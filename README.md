@@ -150,7 +150,12 @@ systemd-run --user --scope -q -p MemoryHigh=3G cargo build --release -j 4
 | `kernels` | Kernels: `saxpy`, `copy`, `transpose`, `gemm`; YOLO ops `conv`, `maxpool`, `upsample`, `concat`. |
 | `apps/runner` | Kernel tests, the GEMM benchmark (`gemm --bench`) and the conv benchmark (`conv-bench`). |
 | `crates/hip_darknet` | Darknet YOLO in Rust: cfg/weights loader, CPU reference, YOLO decode with NMS, GPU executor, CLI. |
-| `tasks/main` | Plan, progress, and lessons learned. |
+| `_shared` | Project rules and settled technical reference: tile model, Darknet semantics, benchmark method. |
+| `workflows` | The two repeatable workflows (`add-kernel`, `port-darknet-model`) with stage contracts and a record of each run. |
+| `_templates` | Starters for a new kernel or a new model port. |
+| `tasks/main` | Progress and lessons for the `main` branch. |
+
+Every folder has a `CONTEXT.md` saying what it does and how to change it; `CLAUDE.md` routes tasks to the right one.
 
 ## The tile model
 
@@ -163,7 +168,9 @@ systemd-run --user --scope -q -p MemoryHigh=3G cargo build --release -j 4
   - `mma`, `transpose` and `reduce` stage data through the launch-sized LDS region.
   - Kernels declare how much they need with `#[kernel(lds = ...)]`, using helpers such as `mma_lds_bytes`. A launch with too little LDS traps instead of corrupting memory.
 - **`mma` without matrix cores.** RDNA2 has no WMMA or MFMA units. `mma` stages both operands in padded LDS rows to avoid bank conflicts. Each thread then accumulates its block of C, up to 8×8, with FMA instructions.
-- **Barriers are plain Rust** (`fence` + `s_barrier` + `fence`). Hand-written AMDGCN assembly is a project rule against, not a missing feature.
+- **Barriers are plain Rust** (`fence` + `s_barrier` + `fence`). The project does not allow hand-written AMDGCN assembly, by choice.
+
+The full model, including the nightly-Rust details it depends on, is in [`_shared/tile-model.md`](_shared/tile-model.md).
 
 ## hip_darknet
 
