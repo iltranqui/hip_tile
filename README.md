@@ -227,4 +227,4 @@ The model tests skip themselves, with a message, if the LegoGears dataset is not
 
 ## License
 
-MIT OR Apache-2.0, as declared in the workspace `Cargo.toml`.
+MIT. See [`LICENSE`](LICENSE).
