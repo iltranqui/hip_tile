@@ -25,7 +25,7 @@ impl Reader<'_> {
         Ok(i32::from_le_bytes(self.bytes(4, what)?.try_into().unwrap()))
     }
     fn floats(&mut self, n: usize, what: &str) -> Result<Vec<f32>> {
-        Ok(self.bytes(n * 4, what)?.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+        Ok(self.bytes(n * 4, what)?.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect())
     }
 }
 

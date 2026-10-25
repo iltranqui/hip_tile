@@ -155,14 +155,14 @@ pub fn nms(dets: &mut Vec<RawDetection>, classes: usize, thresh: f32, kind: NmsK
                 continue;
             }
             let a = dets[i].bbox;
-            for j in i + 1..dets.len() {
+            for d in &mut dets[i + 1..] {
                 let ov = match kind {
-                    NmsKind::Default => box_iou(&a, &dets[j].bbox),
-                    NmsKind::Greedy => box_diou(&a, &dets[j].bbox, 0.6),
-                    NmsKind::Diou => box_diou(&a, &dets[j].bbox, beta),
+                    NmsKind::Default => box_iou(&a, &d.bbox),
+                    NmsKind::Greedy => box_diou(&a, &d.bbox, 0.6),
+                    NmsKind::Diou => box_diou(&a, &d.bbox, beta),
                 };
                 if ov > thresh {
-                    dets[j].probs[k] = 0.0;
+                    d.probs[k] = 0.0;
                 }
             }
         }

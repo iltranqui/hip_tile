@@ -125,7 +125,7 @@ impl Model {
                         if (sh.h, sh.w) != (first.h, first.w) {
                             return Err(bad("route sources differ in H/W".into()));
                         }
-                        if sh.c % r.groups != 0 {
+                        if !sh.c.is_multiple_of(r.groups) {
                             return Err(bad("route source channels not divisible by groups".into()));
                         }
                         c += sh.c / r.groups;

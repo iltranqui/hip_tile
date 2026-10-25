@@ -20,10 +20,16 @@ Plan: `~/.claude/plans/crystalline-dreaming-lightning.md`. Run the LegoGears YOL
 
 - [x] 1. `crates/hip_darknet` (cargo package `hip_darknet`, lib + bin): cfg, weights + BN fold, shapes, CPU reference forward, yolo decode + NMS, image; Rust unit tests + ground-truth label check (no Darknet binary)
 - [x] 2. GPU kernels: conv (implicit GEMM + fused bias/leaky), maxpool, upsample, concat; per-op parity
-- [ ] 3. GPU executor in `hip_darknet` (`--gpu`): per-layer parity, detections equal to the CPU path
-- [ ] 4. App polish: annotated PNG, `--bench`, README results
+- [x] 3. GPU executor in `hip_darknet` (`--gpu`): per-layer parity, detections equal to the CPU path
+- [x] 4. App polish: annotated PNG, `--bench`, README results
 - [ ] 5. Optional: fused route stores, per-layer conv tiles, f16
 
 ## Review
 
-(filled in at the end)
+2026-10-25. Steps 0-4 done and verified in the real repo:
+- `cargo test -p runner --release`: 28 GPU tests pass (gemm vs f64 CPU + rocBLAS, copy, transpose, saxpy, YOLO ops).
+- `cargo test -p hip_darknet --release`: 25 unit + ground-truth + GPU per-layer parity (max rel err 1.7e-4) + detection parity (GPU == CPU on 10 images; GT recall 1.000, precision 1.000, 38/38).
+- LegoGears 224x160: GPU 4.8 ms/frame forward, 5.8 ms end to end; CPU 443 ms (about 92x).
+- Tile GEMM (pure Rust barrier, CPU idle): N=1024 2.05 TFLOP/s (rocBLAS 2.69), N=2048 2.28 (rocBLAS 1.91).
+- No inline asm, no C/C++ in the pipeline, no Darknet binary.
+Open: step 5 (fused route stores, per-layer conv tiles / split-K for 7x5 maps, f16).

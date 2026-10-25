@@ -15,9 +15,9 @@ impl Image {
     pub fn from_rgb8(rgb: &[u8], w: usize, h: usize) -> Image {
         assert_eq!(rgb.len(), w * h * 3);
         let mut data = vec![0f32; w * h * 3];
-        for (i, px) in rgb.chunks_exact(3).enumerate() {
-            for c in 0..3 {
-                data[c * w * h + i] = px[c] as f32 / 255.0;
+        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
+            for (c, &v) in px.iter().enumerate() {
+                data[c * w * h + i] = v as f32 / 255.0;
             }
         }
         Image { w, h, c: 3, data }

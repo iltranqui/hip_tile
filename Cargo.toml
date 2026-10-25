@@ -23,7 +23,6 @@ hip-tile = { path = "crates/hip-tile" }
 hip-tile-macros = { path = "crates/hip-tile-macros" }
 hip-tile-build = { path = "crates/hip-tile-build" }
 kernels = { path = "kernels" }
-hip_darknet = { path = "crates/hip_darknet" }
 
 [profile.release]
 codegen-units = 1
