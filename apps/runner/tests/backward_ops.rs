@@ -425,7 +425,7 @@ fn conv_dx_cpu(c: &ConvCase, w: &[f32], delta: &[f32]) -> Vec<f64> {
                                 if nx < 0 {
                                     continue;
                                 }
-                                if ny as usize % c.stride != 0 || nx as usize % c.stride != 0 {
+                                if !(ny as usize).is_multiple_of(c.stride) || !(nx as usize).is_multiple_of(c.stride) {
                                     continue;
                                 }
                                 let (oy, ox) = (ny as usize / c.stride, nx as usize / c.stride);

@@ -44,7 +44,5 @@ pub mod maxpool_bwd;
 pub mod route_bwd;
 pub mod upsample_bwd;
 pub mod util;
+pub mod yolo_delta;
 
-// The `[yolo]` delta stays on the host for now: it is a few hundred KB per iteration and the
-// verified implementation already exists (`hip_darknet::train::deltas`). A device version is an
-// optimisation, not a correctness requirement — see `workflows/train-darknet-model/runs/*/03_gpu-backward.md`.

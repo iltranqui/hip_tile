@@ -69,13 +69,31 @@ ky = rem/k, kx = rem − ky·k`, so the suspicion is the interaction between the
 `delta` tile and the `BN = 64` gather when `k_total > BK`; a single-channel vs two-channel dump of
 `tb` is the shortest next experiment.
 
+## The `[yolo]` delta, on device
+
+`backward::yolo_delta` is a port of `process_batch`, `delta_yolo_box` and `delta_yolo_class` in
+two passes — one thread per cell/anchor for objectness, one thread per ground-truth box for the
+responsible anchor — with objectness/class **assigned** and box entries **accumulated**, and
+per-truth statistics written to a scratch row so the host can form the reported cost without
+atomics. Device `no_std` has no `atan`, so the CIoU aspect ratio uses a polynomial `atan`; `±8/π²`
+and the `(1−iou+ar_loss+1e-6)` denominator are the Darknet forms.
+
+Parity (`crates/hip_darknet/tests/yolo_delta_gpu.rs`, device vs `train::deltas::yolo_delta`, the
+verified host implementation):
+
+| Case | Result |
+|---|---|
+| classes 5, `mask = 3,4,5`, CIoU, batch 2, 5×7 head | pass (worst rel < 2e-3) |
+| classes 5, `mask = 0,1,2`, CIoU, batch 2, 5×7 head | pass |
+| classes 2, MSE, batch 1 | **fails on 4 of 126 box entries** (one truth's assignment lands on a different anchor/cell than the host); `#[ignore]`d with the reason. This cfg uses `iou_loss=ciou`, so the run is not blocked |
+
+Two bugs were caught here as well: the batch stride of the head tensor was one anchor's planes
+instead of the whole head, and the delta buffer was sized per anchor rather than per image.
+
 ## Remaining
 
 - Fix `conv_bwd_dw`/`conv_bwd_dx` parity for `cin > 1` (above), then wire them.
-- `yolo_delta` on device: **deliberately deferred**. The head tensors are a few hundred KB per
-  iteration, so the trainer can download the head outputs, run the verified host
-  `train::deltas::yolo_delta`, and upload the delta — same math, no duplicated box code. A device
-  version is a latency optimisation, not a correctness requirement.
+- Fix the device MSE box-entry mismatch (unused by this cfg).
 - Batched forward (`conv`/`maxpool`/`upsample`/`concat` at `batch > 1`) and `TrainModel` wiring (stage 04).
 
 ## Test output
