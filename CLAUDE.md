@@ -29,6 +29,7 @@ Built on ICM: folders carry sequencing, hierarchy carries context, files carry s
 | any change at all | `_shared/rules.md` | — (read once) |
 | new kernel or tile op | `workflows/add-kernel/CONTEXT.md` | human reads each stage's run file |
 | new Darknet model or layer | `workflows/port-darknet-model/CONTEXT.md` | human reads each stage's run file |
+| training a Darknet model from scratch | `ROADMAP.md`, then `workflows/train-darknet-model/CONTEXT.md` | human reads each stage's run file |
 | fixing code in one crate | that folder's `CONTEXT.md` | tests pass, output shown |
 | status of a workflow | scan `workflows/*/runs/*/` | report which stage files exist |
 | performance question | `_shared/benchmarking.md` | numbers measured per its method |

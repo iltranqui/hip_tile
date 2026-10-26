@@ -22,7 +22,14 @@ Plan: `~/.claude/plans/crystalline-dreaming-lightning.md`. Run the LegoGears YOL
 - [x] 2. GPU kernels: conv (implicit GEMM + fused bias/leaky), maxpool, upsample, concat; per-op parity
 - [x] 3. GPU executor in `hip_darknet` (`--gpu`): per-layer parity, detections equal to the CPU path
 - [x] 4. App polish: annotated PNG, `--bench`, README results
-- [ ] 5. Optional: fused route stores, per-layer conv tiles, f16
+- [x] 5. Training, stage 01-02 + the device-independent half of 05 (`ROADMAP.md`): Darknet training
+      semantics with citations, cfg training keys, dataset + augmentation, `[yolo]` deltas and cost,
+      training-mode forward/backward (f32), SGD + momentum, numeric gradient checks, Darknet-format
+      `.weights` writer, mAP, `hip_darknet train` — 63 tests pass, clippy clean
+- [ ] 6. GPU training: `hip-tile` ops (accumulating store, channel reduction, batched addressing,
+      accumulating GEMM), conv/bn/yolo/maxpool/upsample/route backward kernels, batched forward,
+      `TrainModel`, 12 000-iteration reference run (`ROADMAP.md` stages 03, 04, 06, 07)
+- [ ] 7. Optional: fused route stores, per-layer conv tiles, f16
 
 ## Review
 

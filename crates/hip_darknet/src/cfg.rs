@@ -20,6 +20,73 @@ pub enum NmsKind {
     Diou,
 }
 
+/// `iou_loss` of a `[yolo]` head. Defaults to `Mse` like Darknet (`darknet_cfg.cpp:2452`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IouLoss {
+    Mse,
+    Iou,
+    Giou,
+    Diou,
+    Ciou,
+}
+
+/// `policy` of the learning-rate schedule.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LrPolicy {
+    Constant,
+    /// Rate is multiplied by `scales[i]` once `steps[i]` iterations have passed (`darknet_network.cpp:718-735`).
+    Steps { steps: Vec<usize>, scales: Vec<f32> },
+}
+
+/// Training-only `[net]` keys. Parsed always, used only by `train`. Semantics:
+/// `_shared/darknet-semantics.md` (Training sections).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainCfg {
+    pub batch: usize,
+    pub subdivisions: usize,
+    pub momentum: f32,
+    pub decay: f32,
+    pub learning_rate: f32,
+    pub burn_in: usize,
+    pub max_batches: usize,
+    /// `power` default 4 (`darknet_cfg.cpp:1678`).
+    pub power: f32,
+    pub policy: LrPolicy,
+    pub angle: f32,
+    pub flip: bool,
+    pub saturation: f32,
+    pub exposure: f32,
+    pub hue: f32,
+}
+
+impl Default for TrainCfg {
+    fn default() -> Self {
+        TrainCfg {
+            batch: 1,
+            subdivisions: 1,
+            momentum: 0.9,
+            decay: 0.0005,
+            learning_rate: 0.001,
+            burn_in: 0,
+            max_batches: 0,
+            power: 4.0,
+            policy: LrPolicy::Constant,
+            angle: 0.0,
+            flip: false,
+            saturation: 1.0,
+            exposure: 1.0,
+            hue: 0.0,
+        }
+    }
+}
+
+impl TrainCfg {
+    /// Iterations of `batch * subdivisions` images in one update (`darknet_network.cpp:589`).
+    pub fn effective_batch(&self) -> usize {
+        self.batch * self.subdivisions
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetCfg {
     pub width: usize,
@@ -63,6 +130,38 @@ pub struct YoloCfg {
     pub scale_x_y: f32,
     pub nms_kind: NmsKind,
     pub beta_nms: f32,
+    /// Training-only keys; ignored by the inference path.
+    pub train: YoloTrainCfg,
+}
+
+/// Training-only `[yolo]` keys (`darknet_cfg.cpp:2437-2468`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct YoloTrainCfg {
+    pub jitter: f32,
+    pub resize: f32,
+    pub iou_loss: IouLoss,
+    pub iou_normalizer: f32,
+    pub obj_normalizer: f32,
+    pub cls_normalizer: f32,
+    pub ignore_thresh: f32,
+    pub truth_thresh: f32,
+    pub max_delta: f32,
+}
+
+impl Default for YoloTrainCfg {
+    fn default() -> Self {
+        YoloTrainCfg {
+            jitter: 0.0,
+            resize: 1.0,
+            iou_loss: IouLoss::Mse,
+            iou_normalizer: 0.75,
+            obj_normalizer: 1.0,
+            cls_normalizer: 1.0,
+            ignore_thresh: 0.5,
+            truth_thresh: 1.0,
+            max_delta: f32::MAX,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +176,8 @@ pub enum LayerCfg {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cfg {
     pub net: NetCfg,
+    /// Training-only `[net]` keys ([`TrainCfg::default`] when absent).
+    pub train: TrainCfg,
     pub layers: Vec<LayerCfg>,
 }
 
@@ -200,6 +301,51 @@ fn sections(text: &str) -> Result<Vec<Section>> {
     Ok(out)
 }
 
+fn parse_train(s: &Section) -> Result<TrainCfg> {
+    // Augmentations we do not implement must fail loudly, never silently no-op.
+    s.forbid(&["mosaic", "mixup", "cutmix"], 0)?;
+    for k in ["adam", "burn_in_adam"] {
+        if s.raw(k).is_some() {
+            return Err(Error::Unsupported(format!("[net] line {}: `{k}` (optimizer must be SGD)", s.line)));
+        }
+    }
+    let angle = s.float("angle", 0.0)?;
+    if angle != 0.0 {
+        return Err(Error::Unsupported(format!("[net] line {}: `angle` rotation is not implemented", s.line)));
+    }
+    let policy = match s.str("policy", "constant").as_str() {
+        "constant" => LrPolicy::Constant,
+        "steps" => {
+            let steps: Vec<usize> = s.int_list("steps")?.into_iter().map(|v| v.max(0) as usize).collect();
+            let scales = s.float_list("scales")?;
+            if steps.is_empty() || steps.len() != scales.len() {
+                return Err(s.err(s.line, "`policy=steps` needs matching `steps` and `scales` lists"));
+            }
+            if steps.windows(2).any(|w| w[0] >= w[1]) {
+                return Err(s.err(s.line, "`steps` must be strictly increasing"));
+            }
+            LrPolicy::Steps { steps, scales }
+        }
+        other => return Err(Error::Unsupported(format!("[net] line {}: policy `{other}`", s.line))),
+    };
+    Ok(TrainCfg {
+        batch: s.positive("batch", 1)?,
+        subdivisions: s.positive("subdivisions", 1)?,
+        momentum: s.float("momentum", 0.9)?,
+        decay: s.float("decay", 0.0005)?,
+        learning_rate: s.float("learning_rate", 0.001)?,
+        burn_in: s.uint("burn_in", 0)?,
+        max_batches: s.uint("max_batches", 0)?,
+        power: s.float("power", 4.0)?,
+        policy,
+        angle,
+        flip: s.int("flip", 0)? != 0,
+        saturation: s.float("saturation", 1.0)?,
+        exposure: s.float("exposure", 1.0)?,
+        hue: s.float("hue", 0.0)?,
+    })
+}
+
 fn parse_conv(s: &Section) -> Result<ConvCfg> {
     s.forbid(
         &[
@@ -239,6 +385,22 @@ fn parse_conv(s: &Section) -> Result<ConvCfg> {
 fn parse_yolo(s: &Section) -> Result<YoloCfg> {
     s.forbid(&["new_coords"], 0)?;
     s.forbid(&["coords"], 4)?;
+    s.forbid(&["objectness_smooth", "focal_loss"], 0)?;
+    if s.raw("classes_multipliers").is_some() {
+        return Err(Error::Unsupported(format!("[yolo] line {}: classes_multipliers", s.line)));
+    }
+    let label_smooth_eps = s.float("label_smooth_eps", 0.0)?;
+    if label_smooth_eps != 0.0 {
+        return Err(Error::Unsupported(format!("[yolo] line {}: label_smooth_eps", s.line)));
+    }
+    let iou_loss = match s.str("iou_loss", "mse").as_str() {
+        "mse" => IouLoss::Mse,
+        "iou" => IouLoss::Iou,
+        "giou" => IouLoss::Giou,
+        "diou" => IouLoss::Diou,
+        "ciou" => IouLoss::Ciou,
+        other => return Err(Error::Unsupported(format!("iou_loss `{other}` (line {})", s.line))),
+    };
     let classes = s.int("classes", 20)?;
     let num = s.positive("num", 1)?;
     let mask: Vec<usize> = if s.raw("mask").is_some() {
@@ -266,6 +428,17 @@ fn parse_yolo(s: &Section) -> Result<YoloCfg> {
         scale_x_y: s.float("scale_x_y", 1.0)?,
         nms_kind,
         beta_nms: s.float("beta_nms", 0.6)?,
+        train: YoloTrainCfg {
+            jitter: s.float("jitter", 0.2)?,
+            resize: s.float("resize", 1.0)?,
+            iou_loss,
+            iou_normalizer: s.float("iou_normalizer", 0.75)?,
+            obj_normalizer: s.float("obj_normalizer", 1.0)?,
+            cls_normalizer: s.float("cls_normalizer", 1.0)?,
+            ignore_thresh: s.float("ignore_thresh", 0.5)?,
+            truth_thresh: s.float("truth_thresh", 1.0)?,
+            max_delta: s.float("max_delta", f32::MAX)?,
+        },
     })
 }
 
@@ -281,6 +454,7 @@ impl Cfg {
             height: first.positive("height", 0)?,
             channels: first.positive("channels", 3)?,
         };
+        let train = parse_train(first)?;
         let mut layers = vec![];
         for s in &secs[1..] {
             layers.push(match s.name.as_str() {
@@ -319,7 +493,7 @@ impl Cfg {
                 other => return Err(Error::Unsupported(format!("layer type [{other}] (line {})", s.line))),
             });
         }
-        Ok(Cfg { net, layers })
+        Ok(Cfg { net, train, layers })
     }
 }
 

@@ -40,8 +40,11 @@ Two `build.rs` files reference `../../kernels`; moving `kernels` or the two cons
 |---|---|---|
 | `workflows/add-kernel/` | one kernel or tile op | 01_spec → 02_kernel → 03_parity → 04_bench |
 | `workflows/port-darknet-model/` | one Darknet model (cfg + weights) | 01_cfg-cpu → 02_gpu-ops → 03_executor → 04_bench-docs |
+| `workflows/train-darknet-model/` | one model + dataset, trained from scratch | 01_train-semantics → 02_cpu-backward → 03_gpu-backward → 04_executor → 05_cli-checkpoints → 06_run → 07_bench-docs |
 
-Each stage folder holds only its contract (`CONTEXT.md`). Each run lives in `runs/<name>/` and gets one file per finished stage, named after the stage (`01_spec.md`, …). New runs start as a copy of `_templates/kernel/` or `_templates/port-run/`.
+Each stage folder holds only its contract (`CONTEXT.md`). Each run lives in `runs/<name>/` and gets one file per finished stage, named after the stage (`01_spec.md`, …). New runs start as a copy of `_templates/kernel/`, `_templates/port-run/` or `_templates/train-run/`.
+
+The training goal, its decisions and acceptance numbers live in `ROADMAP.md`.
 
 ## State
 

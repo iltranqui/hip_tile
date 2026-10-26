@@ -6,9 +6,14 @@ use std::time::Instant;
 
 const USAGE: &str =
     "usage: hip_darknet --cfg C --weights W --names N [--gpu] [--thresh 0.25] [--nms 0.45] [--out PATH] [--bench N] image...
+       hip_darknet train --data D [--cfg C] [--iters N] [--batch N] [--seed S] [--out DIR]
+                         [--save-every N] [--eval-every N] [--eval] [--weights W] [--resume STATE]
   --gpu       run the forward pass on the AMD GPU (needs the default `gpu` feature)
   --out PATH  write annotated image(s); a directory when several images are given
-  --bench N   time N forwards on the first image (CPU and, with --gpu, GPU)";
+  --bench N   time N forwards on the first image (CPU and, with --gpu, GPU)
+
+train: the CPU reference trainer. `--cfg` defaults to the dataset's own cfg next to the `.data`
+file; `--iters` is optimizer steps, `--batch` overrides the cfg's batch.";
 
 struct Args {
     cfg: String,
@@ -169,7 +174,81 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `hip_darknet train …`: the CPU reference trainer (see `ROADMAP.md` for the GPU one).
+fn run_train(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use hip_darknet::train::{TrainOptions, train};
+    let mut data: Option<String> = None;
+    let mut cfg_path: Option<String> = None;
+    let mut opts = TrainOptions { out_dir: "train_out".into(), ..TrainOptions::default() };
+    let mut iters_given = false;
+    let mut i = 0;
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        let mut val = |what: &str| -> Result<String, String> {
+            i += 1;
+            argv.get(i).cloned().ok_or(format!("{what} needs a value"))
+        };
+        match a {
+            "--data" => data = Some(val("--data")?),
+            "--cfg" => cfg_path = Some(val("--cfg")?),
+            "--iters" => {
+                opts.iters = val("--iters")?.parse().map_err(|e| format!("--iters: {e}"))?;
+                iters_given = true;
+            }
+            "--batch" => opts.batch = Some(val("--batch")?.parse().map_err(|e| format!("--batch: {e}"))?),
+            "--seed" => opts.seed = val("--seed")?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--out" => opts.out_dir = val("--out")?.into(),
+            "--save-every" => opts.save_every = val("--save-every")?.parse().map_err(|e| format!("--save-every: {e}"))?,
+            "--eval-every" => opts.eval_every = val("--eval-every")?.parse().map_err(|e| format!("--eval-every: {e}"))?,
+            "--eval" => opts.eval = true,
+            "--weights" => opts.init_weights = Some(val("--weights")?.into()),
+            "--resume" => opts.resume = Some(val("--resume")?.into()),
+            "-h" | "--help" => return Err(USAGE.into()),
+            s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}").into()),
+            s => return Err(format!("unexpected argument {s}\n{USAGE}").into()),
+        }
+        i += 1;
+    }
+    let data = data.ok_or_else(|| format!("train needs --data\n{USAGE}"))?;
+    let ds = hip_darknet::data::Dataset::load(&data)?;
+    let cfg_text = match cfg_path {
+        Some(p) => std::fs::read_to_string(&p)?,
+        None => {
+            // Default: the dataset's own cfg, i.e. the `.data` path with the cfg extension.
+            let p = std::path::Path::new(&data).with_extension("cfg");
+            std::fs::read_to_string(&p).map_err(|e| format!("--cfg not given and {}: {e}", p.display()))?
+        }
+    };
+    let cfg = hip_darknet::cfg::Cfg::parse(&cfg_text)?;
+    if !iters_given {
+        // Default to the cfg's own schedule so a bare `train` does what the cfg says.
+        opts.iters = if cfg.train.max_batches > 0 { cfg.train.max_batches } else { opts.iters };
+    }
+    let summary = train(&cfg, &ds, &opts)?;
+    println!(
+        "trained {} iterations ({} images seen) in {:.1}s: loss {:.4} -> {:.4} (avg {:.4}){}",
+        summary.iterations,
+        summary.seen,
+        summary.seconds,
+        summary.first_loss,
+        summary.last_loss,
+        summary.avg_loss,
+        if opts.eval { format!(", mAP@0.5 {:.4}, mAP@0.5:0.95 {:.4}", summary.map_50, summary.map_50_95) } else { String::new() }
+    );
+    println!("weights: {}", summary.final_weights.display());
+    println!("csv: {} and {}", opts.out_dir.join("loss.csv").display(), opts.out_dir.join("map.csv").display());
+    Ok(())
+}
+
 fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("train") {
+        if let Err(e) = run_train(&argv[1..]) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);

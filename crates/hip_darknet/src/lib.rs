@@ -5,14 +5,18 @@
 //! [`Layer::in_shape`] / [`Layer::out_shape`]. [`reference::forward`] gives every layer's output as
 //! ground truth; feed the `[yolo]` layer inputs to [`yolo::detect_heads`].
 
+pub mod augment;
 pub mod cfg;
+pub mod data;
 pub mod draw;
 mod error;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod image;
+pub mod metrics;
 pub mod model;
 pub mod reference;
+pub mod train;
 pub mod weights;
 pub mod yolo;
 

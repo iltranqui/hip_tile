@@ -12,9 +12,10 @@ One job: load a Darknet model and detect objects, on the CPU (reference) or the 
 ## Files
 
 - `cfg.rs`, `weights.rs` (BN fold), `model.rs` (layers, shapes), `reference.rs` (CPU forward, every layer), `yolo.rs` (decode, DIoU-NMS), `image.rs`, `error.rs`, `lib.rs` (`detect_cpu`, `detect_gpu`).
+- Training (CPU reference today; `ROADMAP.md`): `data.rs` (`.data`, image lists, labels), `augment.rs` (jitter/flip/colour, seeded), `metrics.rs` (mAP@0.5 and 0.5:0.95), `train/` (`deltas.rs` box math + `[yolo]` deltas + cost, `net.rs` unfolded-BN forward/backward/SGD, `checkpoint.rs` Darknet `.weights` writer + resume state, `driver.rs` the loop and csvs).
 - Feature `gpu` (default): `gpu.rs` (`GpuModel`), `draw.rs`, `build.rs` (kernels ELF).
-- `main.rs`: CLI (`--gpu`, `--out`, `--bench`, `--thresh`, `--nms`).
-- `tests/detect.rs` (ground truth), `tests/gpu.rs` (per-layer and detection parity).
+- `main.rs`: CLI (`--gpu`, `--out`, `--bench`, `--thresh`, `--nms`) and the `train` subcommand.
+- `tests/detect.rs` (ground truth), `tests/gpu.rs` (per-layer and detection parity), `tests/gradients.rs` (numeric gradient checks), `tests/learning.rs` (a toy net must learn).
 - `README.md`: usage and API.
 
 ## Dependencies
@@ -28,6 +29,12 @@ One job: load a Darknet model and detect objects, on the CPU (reference) or the 
 - Never run the Darknet binary. Keep `main.rs` thin; logic lives in the library.
 - Keep `--no-default-features` (CPU only) building.
 
+## Rules for training code
+
+- f32 end to end, SGD with momentum only (`ROADMAP.md` Decisions). No Adam, no f64 master copy.
+- Darknet's formulas verbatim, including its quirks (BN backward `n` vs `n-1`, untrained BN shift, the 2× `w`/`h` box slots); deviations are listed in the stage run file and in `_shared/darknet-semantics.md`.
+- Gradients are verified numerically (`tests/gradients.rs`), never against the Darknet binary.
+
 ## Human check
 
-`cargo test -p hip_darknet --release -- --nocapture` and `cargo test -p hip_darknet --release --no-default-features` pass.
+`cargo test -p hip_darknet --release -- --nocapture` and `cargo test -p hip_darknet --release --no-default-features` pass (49 lib + 1 detect + 11 gradient + 2 learning tests on the CPU-only build).

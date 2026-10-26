@@ -265,6 +265,7 @@ mod tests {
             scale_x_y: scale,
             nms_kind: NmsKind::Greedy,
             beta_nms: 0.6,
+            train: crate::cfg::YoloTrainCfg::default(),
         }
     }
 
