@@ -355,7 +355,7 @@ pub fn yolo_delta(
                     let truth = &truths[best_t];
                     let tb = Box { x: truth.x, y: truth.y, w: truth.w, h: truth.h };
                     delta[obj_index] = t.obj_normalizer * (1.0 - out[obj_index]);
-                    delta[class_index + stride * truth.class] = t.cls_normalizer * (1.0 - out[class_index + stride * truth.class]);
+                    delta_class(out, delta, class_index, truth.class, y.classes, stride);
                     delta_box(tb, out, delta, plane, entry, cell, anchor, y, lw, lh, net_w, net_h, t.iou_normalizer, true, &mut stats);
                 }
             }
@@ -393,10 +393,29 @@ pub fn yolo_delta(
         let class_index = entry + (coords + 1) * plane + cell;
         delta_box(tb, out, delta, plane, entry, cell, best_anchor, y, lw, lh, net_w, net_h, t.iou_normalizer, true, &mut stats);
         delta[obj_index] = t.obj_normalizer * (1.0 - out[obj_index]);
-        delta[class_index + stride * truth.class] = t.cls_normalizer * (1.0 - out[class_index + stride * truth.class]);
+        delta_class(out, delta, class_index, truth.class, y.classes, stride);
         stats.count += 1;
     }
     stats
+}
+
+/// `delta_yolo_class` (`yolo_layer.cpp:352`). A cell whose truth-class delta is already set only
+/// has that one refreshed; otherwise every class gets `(n == class) - output`, which is what
+/// pushes the other classes of a positive cell toward 0. `cls_normalizer` only scales the delta
+/// together with `classes_multipliers` there, which this port does not have.
+fn delta_class(out: &[f32], delta: &mut [f32], class_index: usize, class: usize, classes: usize, stride: usize) {
+    let ti = class_index + stride * class;
+    if delta[ti] != 0.0 {
+        delta[ti] = 1.0 - out[ti];
+        return;
+    }
+    for n in 0..classes {
+        let ci = class_index + stride * n;
+        let d = (if n == class { 1.0 } else { 0.0 }) - out[ci];
+        if d.is_finite() {
+            delta[ci] = d;
+        }
+    }
 }
 
 /// `delta_yolo_box` (`yolo_layer.cpp:154-310`) for one anchor cell.
@@ -707,6 +726,29 @@ mod tests {
             assert!(delta[c * plane].is_finite(), "box slot {c} not finite");
             assert!(delta[c * plane].abs() < 1.0);
         }
+    }
+
+    #[test]
+    fn positive_cell_pushes_the_other_classes_toward_zero() {
+        // 3 classes: planes x, y, w, h, obj, c0, c1, c2 of a 2x2 grid; every class prob is 0.4.
+        let y = head(3, vec![0], vec![10.0, 10.0]);
+        let shape = Shape { c: 8, h: 2, w: 2 };
+        let mut out = vec![0.0f32; 8 * 4];
+        for plane_idx in [0usize, 1, 4, 5, 6, 7] {
+            for cell in 0..4 {
+                out[plane_idx * 4 + cell] = if plane_idx >= 5 { 0.4 } else { 0.5 };
+            }
+        }
+        let mut delta = vec![0.0f32; out.len()];
+        let truths = [BoxLabel { class: 1, x: 0.25, y: 0.25, w: 0.5, h: 0.5 }];
+        yolo_delta(&out, shape, &y, &truths, 20, 20, &mut delta);
+        let plane = 4;
+        // The responsible cell is 0: the truth class goes to 1, the others to 0.
+        assert!((delta[5 * plane] + 0.4).abs() < 1e-6, "class 0: {}", delta[5 * plane]);
+        assert!((delta[6 * plane] - 0.6).abs() < 1e-6, "class 1: {}", delta[6 * plane]);
+        assert!((delta[7 * plane] + 0.4).abs() < 1e-6, "class 2: {}", delta[7 * plane]);
+        // Cells without a truth get no class delta.
+        assert_eq!(delta[5 * plane + 1], 0.0);
     }
 
     #[test]

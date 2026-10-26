@@ -15,6 +15,7 @@ Corrections and the rules they produced. Settled technical facts moved to `_shar
 - **Don't trust one benchmark run on the iGPU.** "Tile gemm beats rocBLAS at N=1024" was a clock artifact. Method: `_shared/benchmarking.md`.
 - **Check claims from subagents.** Re-run their tests and benches in the real repo before marking a step done (the bench artifact above was caught this way).
 - **Names the user gives are exact.** The model-port package is `hip_darknet` (underscore), one package with lib + bin.
+- **Device-equals-CPU parity cannot catch a bug both share.** `[yolo]` positive cells only got a delta for the truth class, so the other classes never learned to go to 0: every box scored all 5 classes high, about 4 FP per object at conf 0.25. The reference `delta_yolo_class` sets every class to `(n == class) - output`. The CPU port and the kernel were written from the same misreading, so every parity test passed. Rule: for each loss term, read the reference C++ loop (not a summary of it) and add a hand-computed test of the negatives; look at raw detections (`GT` next to `DET`) before blaming NMS or the metric.
 
 ## Where the facts live
 

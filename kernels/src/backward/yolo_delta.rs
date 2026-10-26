@@ -224,6 +224,30 @@ fn get_box(head: *const f32, entry: u32, cell: u32, ax: f32, ay: f32, p: &YoloDe
     }
 }
 
+/// `delta_yolo_class` (`yolo_layer.cpp:352`). A cell whose truth-class delta is already set only
+/// has that one refreshed; otherwise every class gets `(n == class) - output`, which pushes the
+/// other classes of a positive cell toward 0. (`cls_normalizer` only matters there together with
+/// `classes_multipliers`, which this port does not have.)
+#[cfg(target_arch = "amdgpu")]
+#[inline(always)]
+fn delta_class(head: *const f32, delta: *mut f32, class_index: u32, class: u32, classes: u32, plane: u32) {
+    let ti = (class_index + class * plane) as usize;
+    unsafe {
+        if *delta.add(ti) != 0.0 {
+            *delta.add(ti) = 1.0 - *head.add(ti);
+            return;
+        }
+        for n in 0..classes {
+            let ci = (class_index + n * plane) as usize;
+            let target = if n == class { 1.0 } else { 0.0 };
+            let d = target - *head.add(ci);
+            if d == d && d.abs() < f32::MAX {
+                *delta.add(ci) = d;
+            }
+        }
+    }
+}
+
 /// `delta_yolo_box` (`yolo_layer.cpp:154-310`). `accumulate` follows the caller's convention:
 /// Darknet accumulates box entries in both passes.
 #[cfg(target_arch = "amdgpu")]
@@ -517,8 +541,7 @@ fn yolo_delta_cell(
             };
             unsafe { *dbase.add(obj_index as usize) = p.obj_normalizer * (1.0 - *hbase.add(obj_index as usize)) };
             if class < p.classes {
-                let ci = (class_index + class * plane) as usize;
-                unsafe { *dbase.add(ci) = p.cls_normalizer * (1.0 - *hbase.add(ci)) };
+                delta_class(hbase, dbase, class_index, class, p.classes, plane);
             }
             delta_box(tb, hbase, dbase, entry, cell, ax, ay, &p);
         }
@@ -603,8 +626,7 @@ fn yolo_delta_truth(
     let (iou, giou) = delta_box(tb, hbase, dbase, entry, cell, ax, ay, &p);
     unsafe {
         *dbase.add(obj_index as usize) = p.obj_normalizer * (1.0 - *hbase.add(obj_index as usize));
-        let ci = (class_index + class * plane) as usize;
-        *dbase.add(ci) = p.cls_normalizer * (1.0 - *hbase.add(ci));
+        delta_class(hbase, dbase, class_index, class, p.classes, plane);
         // Per-truth statistics for the reported cost: count, Σiou, Σ(1−iou), Σ(1−giou).
         let sbase = ((b * p.max_truths + t) * 4) as usize;
         *stats.ptr().add(sbase) = 1.0;
