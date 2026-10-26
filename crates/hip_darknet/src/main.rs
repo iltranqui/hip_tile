@@ -8,12 +8,17 @@ const USAGE: &str =
     "usage: hip_darknet --cfg C --weights W --names N [--gpu] [--thresh 0.25] [--nms 0.45] [--out PATH] [--bench N] image...
        hip_darknet train --data D [--cfg C] [--iters N] [--batch N] [--seed S] [--out DIR]
                          [--save-every N] [--eval-every N] [--eval] [--weights W] [--resume STATE]
+       hip_darknet detector train CFG DATA [-map] [-dont_show] [-gpus N] [-iters N] [-batch N] [-out DIR]
   --gpu       run the forward pass on the AMD GPU (needs the default `gpu` feature)
   --out PATH  write annotated image(s); a directory when several images are given
   --bench N   time N forwards on the first image (CPU and, with --gpu, GPU)
 
 train: the CPU reference trainer. `--cfg` defaults to the dataset's own cfg next to the `.data`
-file; `--iters` is optimizer steps, `--batch` overrides the cfg's batch.";
+file; `--iters` is optimizer steps, `--batch` overrides the cfg's batch.
+
+`detector train CFG DATA` is the Darknet-shaped form: the two paths may be given in either order
+(they are told apart by extension), `-map` turns on the periodic mAP, `-dont_show`/`-gpus`/`-clear`
+are accepted and ignored, and checkpoints go next to the `.data` file like Darknet's `backup`.";
 
 struct Args {
     cfg: String,
@@ -240,8 +245,82 @@ fn run_train(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `hip_darknet detector train CFG DATA …` — Darknet's command shape, translated onto
+/// [`run_train`]'s options. Paths are told apart by extension, so either order works.
+fn run_detector(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if argv.first().map(String::as_str) != Some("train") {
+        return Err(format!("detector: only `train` is implemented\n{USAGE}").into());
+    }
+    let mut paths: Vec<String> = vec![];
+    let mut train_argv: Vec<String> = vec![];
+    let mut eval = false;
+    let mut i = 1;
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        let mut val = |what: &str| -> Result<String, String> {
+            i += 1;
+            argv.get(i).cloned().ok_or(format!("{what} needs a value"))
+        };
+        match a {
+            // Darknet flags we accept and ignore (no display, single GPU, no momentum reset).
+            "-dont_show" | "-clear" | "-show_imgs" => {}
+            "-gpus" | "-i" => {
+                let _ = val(a)?;
+            }
+            "-map" => eval = true,
+            // Our own knobs, in Darknet's `-flag value` spelling.
+            "-iters" => train_argv.extend(["--iters".into(), val("-iters")?]),
+            "-batch" => train_argv.extend(["--batch".into(), val("-batch")?]),
+            "-seed" => train_argv.extend(["--seed".into(), val("-seed")?]),
+            "-out" => train_argv.extend(["--out".into(), val("-out")?]),
+            "-save_every" => train_argv.extend(["--save-every".into(), val("-save_every")?]),
+            "-map_every" => train_argv.extend(["--eval-every".into(), val("-map_every")?]),
+            "-weights" => train_argv.extend(["--weights".into(), val("-weights")?]),
+            s if s.starts_with('-') => {
+                return Err(format!("detector train: unknown option {s}\n{USAGE}").into());
+            }
+            s => paths.push(s.to_string()),
+        }
+        i += 1;
+    }
+    let (mut cfg, mut data) = (None, None);
+    for p in paths {
+        match std::path::Path::new(&p).extension().and_then(|e| e.to_str()) {
+            Some("cfg") => cfg = Some(p),
+            Some("data") => data = Some(p),
+            _ => return Err(format!("detector train: expected a .cfg and a .data file, got {p}\n{USAGE}").into()),
+        }
+    }
+    let data = data.ok_or_else(|| format!("detector train: missing the .data file\n{USAGE}"))?;
+    train_argv.extend(["--data".into(), data.clone()]);
+    if let Some(cfg) = cfg {
+        train_argv.extend(["--cfg".into(), cfg]);
+    }
+    if eval {
+        train_argv.push("--eval".into());
+        // Darknet validates every 1000 iterations when `-map` is on.
+        if !train_argv.iter().any(|a| a == "--eval-every") {
+            train_argv.extend(["--eval-every".into(), "1000".into()]);
+        }
+    }
+    // Darknet writes checkpoints to the `.data` file's `backup` directory; ours defaults to the
+    // `.data` file's own directory unless `-out` was given.
+    if !train_argv.iter().any(|a| a == "--out") {
+        let dir = std::path::Path::new(&data).parent().unwrap_or(std::path::Path::new(".")).join("hip_train");
+        train_argv.extend(["--out".into(), dir.to_string_lossy().into_owned()]);
+    }
+    run_train(&train_argv)
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("detector") {
+        if let Err(e) = run_detector(&argv[1..]) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if argv.first().map(String::as_str) == Some("train") {
         if let Err(e) = run_train(&argv[1..]) {
             eprintln!("{e}");

@@ -22,7 +22,17 @@ Contract: [`workflows/train-darknet-model/05_cli-checkpoints/CONTEXT.md`](../../
 hip_darknet train --data <…>.data [--cfg <…>.cfg] [--iters N] [--batch N] [--seed S]
                   [--out DIR] [--save-every N] [--eval-every N] [--eval]
                   [--weights init.weights] [--resume last.state]
+
+# Darknet's shape, same trainer:
+hip_darknet detector train <…>.cfg <…>.data [-map] [-dont_show] [-gpus N]
+                             [-iters N] [-batch N] [-seed S] [-out DIR]
+                             [-save_every N] [-map_every N] [-weights W]
 ```
+
+`detector train` takes the two paths in either order (they are told apart by extension),
+ignores `-dont_show`, `-gpus`, `-clear` and `-show_imgs` like Darknet does, turns `-map` into
+`--eval --eval-every 1000`, and defaults the output directory to `<data dir>/hip_train` — the
+spiritual equivalent of Darknet's `backup`.
 
 - `--cfg` defaults to the `.data` path with a `.cfg` extension (this dataset ships `LegoGears_v2.cfg`).
 - `--iters` defaults to the cfg's `max_batches`.
