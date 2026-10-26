@@ -14,17 +14,25 @@ use hip_rt::{Device, DeviceBuffer, Module, Stream};
 use hip_tile::{Tensor, TensorMut};
 use kernels::backward::bn_fwd::{BnFwdParams, launch_bn_fwd};
 use kernels::backward::bn_stats::{BnStatsParams, launch_bn_stats};
-use kernels::backward::util::launch_running_update;
+use kernels::backward::util::{launch_acc, launch_running_update, launch_zero};
 use kernels::backward::yolo_act::{YoloActParams, launch_yolo_act};
+use kernels::backward::yolo_delta::{
+    IOU_LOSS_CIOU, IOU_LOSS_DIOU, IOU_LOSS_GIOU, IOU_LOSS_IOU, MAX_MASK, YoloDeltaParams, launch_yolo_delta,
+};
 use kernels::yolo::batched::{launch_concat_batched, launch_conv_batched, launch_maxpool_batched, launch_upsample_batched};
 use kernels::yolo::conv::ConvParams;
 use kernels::yolo::maxpool::PoolParams;
 
-use crate::cfg::Activation;
+use crate::cfg::{Activation, IouLoss};
+use crate::data::BoxLabel;
 use crate::error::{Error, Result};
 use crate::gpu::{KERNELS_ELF, hip, upload};
 use crate::model::{LayerKind, Model};
+use crate::train::deltas::{HeadStats, delta_sq, head_cost_from_sums};
 use crate::train::net::{ROLLING_MOMENTUM, TrainNet};
+
+/// Ground-truth boxes per image the device delta can take (Darknet's default `max_boxes`).
+pub const MAX_TRUTHS: usize = 200;
 
 /// One conv layer's device state.
 struct GpuConv {
@@ -43,6 +51,18 @@ struct GpuConv {
     xhat: Option<DeviceBuffer<f32>>,
 }
 
+/// One `[yolo]` head's device state for the loss.
+struct GpuHead {
+    anchors: DeviceBuffer<f32>,
+    /// This head's delta, `[batch x plain]`, rebuilt every iteration.
+    delta: DeviceBuffer<f32>,
+    /// `[batch*MAX_TRUTHS x 6]` as `(class, x, y, w, h, 0)`.
+    truths: DeviceBuffer<f32>,
+    counts: DeviceBuffer<f32>,
+    /// `[batch*MAX_TRUTHS x 4]` per-truth statistics written by the delta kernel.
+    stats: DeviceBuffer<f32>,
+}
+
 pub struct GpuTrainNet {
     model: Model,
     batch: usize,
@@ -53,6 +73,12 @@ pub struct GpuTrainNet {
     /// Per layer activation; a `[yolo]` layer owns its (activated) output.
     outs: Vec<DeviceBuffer<f32>>,
     convs: Vec<Option<GpuConv>>,
+    /// Per layer gradient w.r.t. `outs[i]`.
+    grads: Vec<DeviceBuffer<f32>>,
+    /// Aligned with `model.layers`; `Some` only for `[yolo]` layers.
+    heads: Vec<Option<GpuHead>>,
+    /// Last loss returned by [`GpuTrainNet::loss_and_deltas`].
+    pub loss: f32,
 }
 
 impl GpuTrainNet {
@@ -66,8 +92,30 @@ impl GpuTrainNet {
         let input = hip(DeviceBuffer::zeroed(batch * model.input_shape().len()))?;
         let mut outs = Vec::with_capacity(model.layers.len());
         let mut convs = Vec::with_capacity(model.layers.len());
+        let mut grads = Vec::with_capacity(model.layers.len());
+        let mut heads = Vec::with_capacity(model.layers.len());
         for (i, layer) in model.layers.iter().enumerate() {
             outs.push(hip(DeviceBuffer::zeroed(batch * layer.out_shape.len()))?);
+            grads.push(hip(DeviceBuffer::zeroed(batch * layer.out_shape.len()))?);
+            heads.push(match &layer.kind {
+                LayerKind::Yolo(y) => {
+                    if y.train.iou_loss == IouLoss::Mse {
+                        // The device MSE branch disagrees with the host on a few entries (stage 03).
+                        return Err(Error::Unsupported(format!("layer {i}: GPU [yolo] iou_loss=mse")));
+                    }
+                    if y.mask.len() > MAX_MASK {
+                        return Err(Error::Unsupported(format!("layer {i}: mask longer than {MAX_MASK}")));
+                    }
+                    Some(GpuHead {
+                        anchors: hip(DeviceBuffer::from_slice(&y.anchors))?,
+                        delta: hip(DeviceBuffer::zeroed(batch * layer.out_shape.len()))?,
+                        truths: hip(DeviceBuffer::zeroed(batch * MAX_TRUTHS * 6))?,
+                        counts: hip(DeviceBuffer::zeroed(batch))?,
+                        stats: hip(DeviceBuffer::zeroed(batch * MAX_TRUTHS * 4))?,
+                    })
+                }
+                _ => None,
+            });
             match (&layer.kind, &net.convs[i]) {
                 (LayerKind::Conv(c), Some(st)) => {
                     if !matches!(c.cfg.activation, Activation::Linear | Activation::Leaky) {
@@ -91,7 +139,7 @@ impl GpuTrainNet {
                 _ => convs.push(None),
             }
         }
-        Ok(GpuTrainNet { model, batch, _device: device, module, stream, input, outs, convs })
+        Ok(GpuTrainNet { model, batch, _device: device, module, stream, input, outs, convs, grads, heads, loss: 0.0 })
     }
 
     pub fn batch(&self) -> usize {
@@ -185,6 +233,122 @@ impl GpuTrainNet {
             }
         }
         hip(self.stream.synchronize())
+    }
+
+    /// Zero every layer gradient; call once per iteration before the loss.
+    pub fn zero_grads(&mut self) -> Result<()> {
+        for g in &self.grads {
+            let n = g.len() as u32;
+            hip(launch_zero(&self.module, Some(&self.stream), TensorMut::vector(g.as_ptr().cast_mut(), n)))?;
+        }
+        hip(self.stream.synchronize())
+    }
+
+    /// The `[yolo]` deltas for one batch, added into the previous layers' gradients, and the
+    /// network loss (the mean of the per-head costs, as [`TrainNet::loss_and_deltas`]). The
+    /// per-head delta and per-truth statistics come back to the host to form the reported cost;
+    /// the gradient itself never leaves the device.
+    pub fn loss_and_deltas(&mut self, truths: &[Vec<BoxLabel>]) -> Result<f32> {
+        if truths.len() != self.batch {
+            return Err(Error::Model(format!("{} truth sets for a batch of {}", truths.len(), self.batch)));
+        }
+        if let Some(n) = truths.iter().map(Vec::len).find(|&n| n > MAX_TRUTHS) {
+            return Err(Error::Model(format!("{n} ground-truth boxes in one image, the device takes {MAX_TRUTHS}")));
+        }
+        let heads = self.model.yolo_layers();
+        if heads.is_empty() {
+            return Err(Error::Model("cfg has no [yolo] layer".into()));
+        }
+        let mut rows = vec![0f32; self.batch * MAX_TRUTHS * 6];
+        let mut counts = vec![0f32; self.batch];
+        for (b, ls) in truths.iter().enumerate() {
+            counts[b] = ls.len() as f32;
+            for (t, l) in ls.iter().enumerate() {
+                rows[(b * MAX_TRUTHS + t) * 6..][..5].copy_from_slice(&[l.class as f32, l.x, l.y, l.w, l.h]);
+            }
+        }
+        let (md, st) = (&self.module, Some(&self.stream));
+        let (net_w, net_h) = (self.model.net.width as u32, self.model.net.height as u32);
+        let mut total = 0.0f32;
+        for &i in &heads {
+            let LayerKind::Yolo(y) = &self.model.layers[i].kind else { unreachable!() };
+            let shape = self.model.layers[i].out_shape;
+            let plain = shape.len();
+            let head = self.heads[i].as_ref().expect("yolo head");
+            hip(upload(&head.truths, &rows))?;
+            hip(upload(&head.counts, &counts))?;
+            let t = &y.train;
+            let mut p = YoloDeltaParams {
+                classes: y.classes as u32,
+                num: (y.anchors.len() / 2) as u32,
+                n_mask: y.mask.len() as u32,
+                mask: [0; MAX_MASK],
+                scale_x_y: y.scale_x_y,
+                iou_normalizer: t.iou_normalizer,
+                obj_normalizer: t.obj_normalizer,
+                cls_normalizer: t.cls_normalizer,
+                ignore_thresh: t.ignore_thresh,
+                truth_thresh: t.truth_thresh,
+                max_delta: t.max_delta,
+                iou_loss: match t.iou_loss {
+                    IouLoss::Iou => IOU_LOSS_IOU,
+                    IouLoss::Giou => IOU_LOSS_GIOU,
+                    IouLoss::Diou => IOU_LOSS_DIOU,
+                    IouLoss::Ciou => IOU_LOSS_CIOU,
+                    IouLoss::Mse => unreachable!("rejected in from_net"),
+                },
+                lw: shape.w as u32,
+                lh: shape.h as u32,
+                net_w,
+                net_h,
+                batch: self.batch as u32,
+                max_truths: MAX_TRUTHS as u32,
+            };
+            for (k, m) in y.mask.iter().enumerate() {
+                p.mask[k] = *m as u32;
+            }
+            let planes = (y.mask.len() * (y.classes + 5)) as u32;
+            let plane = (shape.w * shape.h) as u32;
+            let n = (self.batch * plain) as u32;
+            hip(launch_zero(md, st, TensorMut::vector(head.delta.as_ptr().cast_mut(), n)))?;
+            hip(launch_yolo_delta(
+                md,
+                st,
+                Tensor::new(self.outs[i].as_ptr(), planes, plane, plane),
+                Tensor::vector(head.anchors.as_ptr(), y.anchors.len() as u32),
+                Tensor::new(head.truths.as_ptr(), (self.batch * MAX_TRUTHS) as u32, 6, 6),
+                Tensor::vector(head.counts.as_ptr(), self.batch as u32),
+                TensorMut::new(head.delta.as_ptr().cast_mut(), planes, plane, plane),
+                TensorMut::new(head.stats.as_ptr().cast_mut(), (self.batch * MAX_TRUTHS) as u32, 4, 4),
+                &p,
+            ))?;
+            // Darknet adds the head's delta into the previous layer's gradient.
+            hip(launch_acc(md, st, Tensor::vector(head.delta.as_ptr(), n), TensorMut::vector(self.grads[i - 1].as_ptr().cast_mut(), n)))?;
+            hip(self.stream.synchronize())?;
+
+            let delta = hip(head.delta.copy_to_vec())?;
+            let per_truth = hip(head.stats.copy_to_vec())?;
+            let mut stats = HeadStats::default();
+            for r in per_truth.as_chunks::<4>().0 {
+                stats.count += r[0] as usize;
+                stats.tot_iou += r[1];
+                stats.tot_iou_loss += r[2];
+                stats.tot_giou_loss += r[3];
+            }
+            let (mut sq_all, mut sq_nobox) = (0.0f32, 0.0f32);
+            for img in delta.chunks_exact(plain) {
+                sq_all += delta_sq(img, shape, y, false);
+                sq_nobox += delta_sq(img, shape, y, true);
+            }
+            total += head_cost_from_sums(y, &stats, sq_all, sq_nobox);
+        }
+        self.loss = total / heads.len() as f32;
+        Ok(self.loss)
+    }
+
+    /// Download layer `i`'s gradient w.r.t. its output (`[batch x C x H x W]`), for parity checks.
+    pub fn layer_grad(&self, i: usize) -> Result<Vec<f32>> {
+        hip(self.grads[i].copy_to_vec())
     }
 
     /// Download layer `i`'s output (`[batch x C x H x W]`), for parity checks.

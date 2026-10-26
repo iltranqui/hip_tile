@@ -6,7 +6,7 @@
 //! training path / SGD and learning rate / Gradient routing).
 
 use crate::augment::Rng;
-use crate::cfg::{Activation, Cfg, ConvCfg, IouLoss, LrPolicy, MaxpoolCfg, TrainCfg, YoloCfg};
+use crate::cfg::{Activation, Cfg, ConvCfg, LrPolicy, MaxpoolCfg, TrainCfg, YoloCfg};
 use crate::data::BoxLabel;
 use crate::error::{Error, Result};
 use crate::model::{LayerKind, Model, Shape};
@@ -238,18 +238,7 @@ impl TrainNet {
                     *gi += d;
                 }
             }
-            let t = &y.train;
-            let cost = if t.iou_loss == IouLoss::Mse {
-                sq_all
-            } else {
-                let count = stats.count.max(1) as f32;
-                let iou_avg = if t.iou_loss == IouLoss::Giou {
-                    t.iou_normalizer * (stats.tot_giou_loss / count)
-                } else {
-                    t.iou_normalizer * (stats.tot_iou_loss / count)
-                };
-                iou_avg + t.obj_normalizer * sq_nobox
-            };
+            let cost = deltas::head_cost_from_sums(y, &stats, sq_all, sq_nobox);
             total += cost;
         }
         self.loss = total / heads.len() as f32;

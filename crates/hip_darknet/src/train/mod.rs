@@ -11,7 +11,7 @@ pub mod driver;
 pub mod gpu;
 pub mod net;
 
-pub use deltas::{box_ciou, box_diou, box_giou, box_iou, dx_box_iou, head_cost, yolo_delta, Box, DxRep};
+pub use deltas::{box_ciou, box_diou, box_giou, box_iou, dx_box_iou, head_cost, head_cost_from_sums, yolo_delta, Box, DxRep};
 pub use driver::{train, LOSS_CSV_HEADER, MAP_CSV_HEADER, LossRow, TrainOptions, TrainSummary};
 #[cfg(feature = "gpu")]
 pub use gpu::GpuTrainNet;

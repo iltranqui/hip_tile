@@ -468,8 +468,7 @@ fn delta_box(
     delta[idx + 3 * plane] += dh;
 }
 
-/// The reported cost of one head (`yolo_layer.cpp:1255-1291`): `Σδ²` for `mse`, otherwise
-/// the IoU-loss average plus the normalised classification cost.
+/// `Σδ²` of one image's head delta, optionally skipping the four box entries (`x, y, w, h`).
 pub fn delta_sq(delta: &[f32], shape: Shape, y: &YoloCfg, skip_box: bool) -> f32 {
     let plane = shape.w * shape.h;
     let mut acc = 0.0f32;
@@ -488,12 +487,13 @@ pub fn delta_sq(delta: &[f32], shape: Shape, y: &YoloCfg, skip_box: bool) -> f32
     acc
 }
 
-/// The reported cost of one head (`yolo_layer.cpp:1255-1291`): `Σδ²` for `mse`, otherwise
-/// the IoU-loss average plus the normalised classification cost.
-pub fn head_cost(delta: &[f32], shape: Shape, y: &YoloCfg, stats: &HeadStats) -> f32 {
+/// The reported cost of one head from its summed statistics (`yolo_layer.cpp:1255-1291`):
+/// `sq_all` / `sq_nobox` are `Σδ²` over the whole batch with and without the box entries. `mse`
+/// reports `sq_all`; otherwise the IoU-loss average plus the normalised classification cost.
+pub fn head_cost_from_sums(y: &YoloCfg, stats: &HeadStats, sq_all: f32, sq_nobox: f32) -> f32 {
     let t = &y.train;
     if t.iou_loss == IouLoss::Mse {
-        return delta_sq(delta, shape, y, false);
+        return sq_all;
     }
     let count = stats.count.max(1) as f32;
     let iou_loss_avg = if t.iou_loss == IouLoss::Giou {
@@ -501,7 +501,12 @@ pub fn head_cost(delta: &[f32], shape: Shape, y: &YoloCfg, stats: &HeadStats) ->
     } else {
         t.iou_normalizer * (stats.tot_iou_loss / count)
     };
-    iou_loss_avg + t.obj_normalizer * delta_sq(delta, shape, y, true)
+    iou_loss_avg + t.obj_normalizer * sq_nobox
+}
+
+/// The reported cost of one head for a single-image `delta` (see [`head_cost_from_sums`]).
+pub fn head_cost(delta: &[f32], shape: Shape, y: &YoloCfg, stats: &HeadStats) -> f32 {
+    head_cost_from_sums(y, stats, delta_sq(delta, shape, y, false), delta_sq(delta, shape, y, true))
 }
 
 #[cfg(test)]
