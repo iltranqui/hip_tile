@@ -54,12 +54,12 @@ Every gradient kernel accumulates into its destination rather than overwriting i
 
 Three real bugs were caught by these tests, which is the argument for writing them first: the flat kernels used the wrong grid axis (`grid` is `(x, y)` and `block_id()` is `(y, x)`), the maxpool gather indexed the input without its channel offset, and `bn_stats`/`bn_bwd` treated the channel stride as 1 instead of `spatial`.
 
-## Convolution gradients (written, one known failure)
+## Convolution gradients (verified, batched)
 
 | Kernel | Design | State |
 |---|---|---|
-| `conv_bwd_dw` | block owns one `[Cout x Cin·k²]` tile and walks the **whole batch inside its k-loop**: `A = δ[Cout x OH·OW]`, `B = im2col(x)ᵀ` gathered on the fly, `dW` seeded from the buffer's existing contents (momentum semantics) | **correct for `batch == 1`** for every shape tried (1–20 channels, k 1/3, stride 1/2, pad 0/1); **wrong when `batch > 1`** — the defect is reaching image `b > 0` |
-| `conv_bwd_dx` | transpose-convolution **gather**: `k²` GEMMs against `Co` folding into one register accumulator per `[Cin x positions]` tile, both operands gathered (weights are strided in both axes for a fixed tap), accumulated once via `store_tile_add` | written, parity blocked behind the same test |
+| `conv_bwd_dw` | block owns one `[Cout x Cin·k²]` tile and walks the **whole batch inside its k-loop**: `A = δ[Cout x OH·OW]`, `B = im2col(x)ᵀ` gathered on the fly, `dW` seeded from the buffer's existing contents (momentum semantics) | **correct** for every shape tried (1–20 channels, k 1/3, stride 1/2, pad 0/1), at `batch` 1 and 2 |
+| `conv_bwd_dx` | transpose-convolution **gather**: `k²` GEMMs against `Co` folding into one register accumulator per `[Cin x positions]` tile **per image**, both operands gathered (weights are strided in both axes for a fixed tap), accumulated once per image into `dx + b·Cin·ld` via `store_tile_add` | **correct**, batch 1 and 2 |
 
 Two bugs were found and fixed while getting here, both caught by the tests rather than by reading:
 
@@ -71,11 +71,14 @@ Two bugs were found and fixed while getting here, both caught by the tests rathe
    stored with `store_tile_add`, so the old contents were added twice (`2·old + dW`); it must
    overwrite (`store_tile`).
 
-What remains is only the batched case: `apps/runner/tests/backward_ops.rs::conv_bwd_matches_cpu`
-asserts the single-image shapes, and `conv_bwd_matches_cpu_batched` holds the `batch > 1` cases
-behind `#[ignore]` with the reason. Next experiment: dump the per-image base offsets
-(`b·Cout·ld` for δ, `b·Cin·ld` for x) against what the host image slice expects — the gather and
-the GEMM are already exact for image 0.
+3. **The `batch > 1` failure was in `conv_bwd_dx` and the test, not `conv_bwd_dw`.** `conv_bwd_dx`
+   summed every image into one accumulator and stored it into image 0's `dx` slice, but `dX` is per
+   image (`dx + b·Cin·ld`). The test's dX buffer was also sized for one image, which hid the shape
+   mismatch. Earlier notes blaming `conv_bwd_dw` offsets, and the `cin > 1` diagnosis before that,
+   were both wrong: `conv_bwd_dw` passes at `batch = 2` unchanged.
+
+`conv_bwd_matches_cpu` (batch 1) and `conv_bwd_matches_cpu_batched` (batch 2, four shapes) both pass;
+the batched test is no longer `#[ignore]`d.
 
 ## The `[yolo]` delta, on device
 
@@ -100,13 +103,13 @@ instead of the whole head, and the delta buffer was sized per anchor rather than
 
 ## Remaining
 
-- Fix `conv_bwd_dw`/`conv_bwd_dx` parity for `cin > 1` (above), then wire them.
+- Wire `conv_bwd_dw`/`conv_bwd_dx` into the executor (stage 04).
 - Fix the device MSE box-entry mismatch (unused by this cfg).
 - Batched forward (`conv`/`maxpool`/`upsample`/`concat` at `batch > 1`) and `TrainModel` wiring (stage 04).
 
 ## Test output
 
 ```
-cargo test -p runner --release       34 passed (6 backward_ops, 5 gemm, 5 memory, 1 rocblas, 3 saxpy, 14 yolo_ops)
+cargo test -p runner --release       36 passed (8 backward_ops, 5 gemm, 5 memory, 1 rocblas, 3 saxpy, 14 yolo_ops)
 cargo clippy --workspace --all-targets   0 warnings
 ```

@@ -1,13 +1,13 @@
 //! Input gradient of a convolution, written as a **transpose-convolution gather**: no scatter,
 //! no atomics, fully deterministic.
 //!
-//! `dX[ci][iy][ix] = Σ_b Σ_{co,ky,kx} W[co][ci][ky][kx] · δ[b][co][oy][ox]`,
+//! `dX[b][ci][iy][ix] = Σ_{co,ky,kx} W[co][ci][ky][kx] · δ[b][co][oy][ox]`,
 //! with `oy = (iy + p − ky)/s`, `ox = (ix + p − kx)/s`, only when the division is exact and the
 //! output position exists.
 //!
 //! Per image this is `k²` GEMMs against `Co`, sharing one register accumulator for the block's
-//! `[Cin × positions]` tile — so all `ky`, `kx` and the whole batch fold into that tile and `dx`
-//! is accumulated once at the end (`store_tile_add`, because several branches may feed the same
+//! `[Cin × positions]` tile — so all `ky`, `kx` fold into that tile and image `b`'s slice of `dx`
+//! (at `+b·Cin·ld`) is accumulated once per image (`store_tile_add`, because several branches may feed the same
 //! input buffer).
 //!
 //! Both operands are gathered with `from_fn`: the weights because a `(ky, kx)` slice of
@@ -33,8 +33,9 @@ fn conv_bwd_dx(delta: Tensor<f32>, w: Tensor<f32>, dx: TensorMut<f32>, p: ConvBw
     let n_in = conv.h * conv.w;
     let n_out = conv.oh * conv.ow;
     let (wp, dld) = (w.ptr(), delta.ld() as usize);
-    let mut acc = Tile::<f32, BM, BN>::zeros();
     for b in 0..p.batch {
+        // dX is per image: each image gets its own accumulator and its own output slice.
+        let mut acc = Tile::<f32, BM, BN>::zeros();
         let dbase = unsafe { delta.ptr().add(b as usize * co_tot as usize * dld) };
         for ky in 0..conv.k {
             for kx in 0..conv.k {
@@ -79,8 +80,14 @@ fn conv_bwd_dx(delta: Tensor<f32>, w: Tensor<f32>, dx: TensorMut<f32>, p: ConvBw
             }
         }
         let _ = n_out;
+        let dxb = TensorMut::new(
+            unsafe { dx.ptr().add(b as usize * ci_tot as usize * dx.ld() as usize) },
+            dx.rows(),
+            dx.cols(),
+            dx.ld(),
+        );
+        dxb.store_tile_add(r0, c0, &acc);
     }
-    dx.store_tile_add(r0, c0, &acc);
 }
 
 /// `delta: [Cout x OH*OW]`, `w: [Cout x Cin*k*k]`, `dx: [Cin x H*W]` (accumulated into).

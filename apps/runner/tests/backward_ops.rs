@@ -495,7 +495,7 @@ fn check_conv_bwd(c: ConvCase) {
     assert!(err < 2e-4, "conv_bwd_dw {:?}: {err:e}", (c.cin, c.cout, c.h, c.w, c.k));
 
     // dX, also poisoned.
-    let mut bdx = DeviceBuffer::from_slice(&vec![POISON; c.cin * hw]).unwrap();
+    let mut bdx = DeviceBuffer::from_slice(&vec![POISON; c.batch * c.cin * hw]).unwrap();
     let w_view = Tensor::new(bw.as_ptr(), c.cout as u32, kdim as u32, kdim as u32);
     launch_conv_bwd_dx(&module, None, d_view, w_view, bdx.tensor_mut(c.cin as u32, hw as u32), &p).unwrap();
     let got: Vec<f64> = bdx.copy_to_vec().unwrap().iter().map(|v| f64::from(*v) - f64::from(POISON)).collect();
@@ -517,13 +517,9 @@ fn conv_bwd_matches_cpu() {
     check_conv_bwd(ConvCase { cin: 4, cout: 20, h: 10, w: 9, k: 3, stride: 1, pad: 1, batch: 1 });
 }
 
-/// KNOWN FAILURE: with `batch > 1`, `conv_bwd_dw` disagrees with the CPU reference (the batched
-/// `dX` is fine — the first batched case fails inside the dW comparison). Single-image cases above
-/// are exact, so the defect is in reaching image `b > 0` (the per-image base offsets
-/// `b·Cout·ld` / `b·Cin·ld`), not in the gather or the GEMM. Ignored rather than deleted so the
-/// gap stays visible; this is what blocks the GPU trainer (stage 04).
+/// Batched cases (`batch > 1`). `conv_bwd_dx` once folded every image into image 0's `dx` slice;
+/// each image must land at `dx + b·Cin·ld`. The dX buffer here holds the whole batch.
 #[test]
-#[ignore = "conv_bwd_dw disagrees with the CPU reference when batch > 1"]
 fn conv_bwd_matches_cpu_batched() {
     check_conv_bwd(ConvCase { cin: 2, cout: 3, h: 6, w: 5, k: 3, stride: 1, pad: 1, batch: 2 });
     check_conv_bwd(ConvCase { cin: 3, cout: 4, h: 8, w: 8, k: 3, stride: 2, pad: 0, batch: 2 });
