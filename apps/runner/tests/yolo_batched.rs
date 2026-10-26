@@ -102,8 +102,8 @@ fn concat_batched_matches_per_image() {
         TensorMut::new(unsafe { base.add(ch0 * hw) }, rows as u32, hw as u32, hw as u32)
     };
     let stride = total * hw;
-    launch_concat_batched(&md, None, BATCH as u32, da.tensor(ca as u32, hw as u32), view(0, ca), stride).unwrap();
-    launch_concat_batched(&md, None, BATCH as u32, db.tensor(cb as u32, hw as u32), view(ca, cb), stride).unwrap();
+    launch_concat_batched(&md, None, BATCH as u32, da.tensor(ca as u32, hw as u32), ca * hw, view(0, ca), stride).unwrap();
+    launch_concat_batched(&md, None, BATCH as u32, db.tensor(cb as u32, hw as u32), cb * hw, view(ca, cb), stride).unwrap();
     let mut want = Vec::new();
     for i in 0..BATCH {
         want.extend_from_slice(&a[i * ca * hw..(i + 1) * ca * hw]);

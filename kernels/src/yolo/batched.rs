@@ -73,25 +73,27 @@ pub fn launch_upsample_batched(
     Ok(())
 }
 
-/// `launch_concat` for `batch` images: `x` is `[C x HW]` per image, `y` a channel-slice view of
-/// one image of the destination (`ld` and per-image stride come from the full buffer, so pass
-/// `y_image_stride` = the destination's `Ctotal * ld`).
+/// `launch_concat` for `batch` images: `x` and `y` are channel-slice views of image 0 of the
+/// source and the destination. The per-image strides come from the full buffers (`Csrc * ld`,
+/// `Cdst * ld`), because a route may read a group or write a slice of a larger tensor.
 pub fn launch_concat_batched(
     module: &Module,
     stream: Option<&Stream>,
     batch: u32,
     x: Tensor<f32>,
+    x_image_stride: usize,
     y: TensorMut<f32>,
     y_image_stride: usize,
 ) -> Result<()> {
     for b in 0..batch {
+        let xb = Tensor::new(unsafe { x.ptr().add(b as usize * x_image_stride) }, x.rows(), x.cols(), x.ld());
         let yb = TensorMut::new(
             unsafe { y.ptr().add(b as usize * y_image_stride) },
             y.rows(),
             y.cols(),
             y.ld(),
         );
-        launch_concat(module, stream, image(x, b), yb)?;
+        launch_concat(module, stream, xb, yb)?;
     }
     Ok(())
 }

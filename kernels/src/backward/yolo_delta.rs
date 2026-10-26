@@ -197,7 +197,7 @@ fn box_ciou(a: Bx, b: Bx) -> f32 {
 
 #[cfg(target_arch = "amdgpu")]
 #[inline(always)]
-fn expf(x: f32) -> f32 {
+pub(crate) fn expf(x: f32) -> f32 {
     core::intrinsics::exp::<f32>(x)
 }
 

@@ -15,10 +15,10 @@ use kernels::yolo::maxpool::{PoolParams, launch_maxpool};
 use kernels::yolo::upsample::launch_upsample;
 
 /// The kernels crate compiled for gfx1031.
-static KERNELS_ELF: &[u8] = include_bytes!(env!("HIP_TILE_KERNELS_ELF"));
+pub(crate) static KERNELS_ELF: &[u8] = include_bytes!(env!("HIP_TILE_KERNELS_ELF"));
 
 /// Blocking host-to-device copy into a buffer owned elsewhere by shared reference.
-fn upload(dst: &DeviceBuffer<f32>, src: &[f32]) -> hip_rt::Result<()> {
+pub(crate) fn upload(dst: &DeviceBuffer<f32>, src: &[f32]) -> hip_rt::Result<()> {
     assert_eq!(dst.len(), src.len());
     // SAFETY: `dst` is a live device allocation of `src.len()` floats; the host never reads it directly.
     let rc = unsafe {
@@ -32,7 +32,7 @@ fn upload(dst: &DeviceBuffer<f32>, src: &[f32]) -> hip_rt::Result<()> {
     if rc == 0 { Ok(()) } else { Err(hip_rt::HipError::other(format!("hipMemcpy failed: {rc:?}"))) }
 }
 
-fn hip<T>(r: hip_rt::Result<T>) -> Result<T> {
+pub(crate) fn hip<T>(r: hip_rt::Result<T>) -> Result<T> {
     r.map_err(|e| Error::Unsupported(format!("hip: {e}")))
 }
 

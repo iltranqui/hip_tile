@@ -12,7 +12,7 @@
 //! - [`route_bwd`]: channel-block accumulate for route/concat fan-in.
 //! - [`bn_stats`], [`bn_fwd`], [`bn_bwd`]: batch-norm statistics, forward and gradients.
 //! - [`conv_bwd_dw`], [`conv_bwd_dx`]: the two convolution gradients.
-//! - [`yolo_delta`]: the `[yolo]` delta tensor.
+//! - [`yolo_act`], [`yolo_delta`]: the `[yolo]` forward activation and delta tensor.
 
 use hip_tile::KernelArg;
 
@@ -45,5 +45,6 @@ pub mod maxpool_bwd;
 pub mod route_bwd;
 pub mod upsample_bwd;
 pub mod util;
+pub mod yolo_act;
 pub mod yolo_delta;
 
