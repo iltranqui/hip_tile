@@ -29,6 +29,6 @@ Measured 2026-10-25, CPU idle, pure-Rust barrier (see the run files for details)
 | Tile gemm 128×128×16, N=1024 | 2.05 TFLOP/s (rocBLAS 2.69) |
 | Tile gemm 128×128×16, N=2048 | 2.28 TFLOP/s (rocBLAS 1.91) |
 | YOLO conv, 56×40 maps / 7×5 maps | 850–970 / 250–320 GFLOP/s |
-| LegoGears YOLOv4-tiny, GPU forward / CPU forward | 4.8 / 443 ms per frame |
+| LegoGears YOLOv4-tiny, GPU forward / CPU forward | 4.78 / 459.84 ms per frame (2026-10-26, default-features build; a `--no-default-features` binary has no GPU path at all) |
 
 Commands: `cargo run -p runner --release -- gemm --n N --bench`, `cargo run -p runner --release -- conv-bench`, `cargo run -p hip_darknet --release -- --gpu --bench 200 ...`.

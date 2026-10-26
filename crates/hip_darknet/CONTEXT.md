@@ -18,6 +18,16 @@ One job: load a Darknet model and detect objects, on the CPU (reference) or the 
 - `tests/detect.rs` (ground truth), `tests/gpu.rs` (per-layer and detection parity), `tests/gradients.rs` (numeric gradient checks), `tests/learning.rs` (a toy net must learn).
 - `README.md`: usage and API.
 
+## Features (read before building)
+
+- Default features include `gpu`: the HIP executor, the kernels code object, and `--gpu`.
+- `--no-default-features` is the CPU-only build. It compiles **no** HIP code, so `--gpu` is absent
+  and `train` is CPU-only — a binary built this way can never touch the GPU. Use it only to prove
+  the CPU path still builds.
+- Consequence for training: today's trainer is CPU-only in *both* builds. The GPU inference path
+  measured 4.78 ms/frame against 459.84 ms/frame on the CPU (96x) in the default-features build,
+  which is what the missing GPU trainer would buy.
+
 ## Dependencies
 
 - Depends on: `image` (png, jpeg), `thiserror`; with `gpu`: `hip-sys`, `hip-rt`, `hip-tile`, `kernels`, build-dep `hip-tile-build`.
