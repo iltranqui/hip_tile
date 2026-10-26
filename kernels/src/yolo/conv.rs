@@ -23,6 +23,8 @@ pub const BK: usize = 16;
 #[derive(Clone, Copy, Debug)]
 pub struct ConvParams {
     pub cin: u32,
+    /// Output channels (`filters`); the weight tensor's row count.
+    pub cout: u32,
     pub h: u32,
     pub w: u32,
     /// Kernel size (square).
@@ -39,13 +41,25 @@ pub struct ConvParams {
 unsafe impl KernelArg for ConvParams {}
 
 impl ConvParams {
+    /// Output channels; falls back to 0 for the forward-only constructor.
+    pub const fn cout(&self) -> u32 {
+        self.cout
+    }
+
     pub const LINEAR: u32 = 0;
     pub const LEAKY: u32 = 1;
 
     /// Output size follows the usual `(in + 2*pad - k) / stride + 1`.
     pub fn new(cin: u32, h: u32, w: u32, k: u32, stride: u32, pad: u32, act: u32) -> Self {
+        Self::with_cout(cin, 0, h, w, k, stride, pad, act)
+    }
+
+    /// Same, with the output-channel count set (needed by the backward kernels).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_cout(cin: u32, cout: u32, h: u32, w: u32, k: u32, stride: u32, pad: u32, act: u32) -> Self {
         Self {
             cin,
+            cout,
             h,
             w,
             k,

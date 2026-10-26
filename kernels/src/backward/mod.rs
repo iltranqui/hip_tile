@@ -14,13 +14,37 @@
 //! - [`conv_bwd_dw`], [`conv_bwd_dx`]: the two convolution gradients.
 //! - [`yolo_delta`]: the `[yolo]` delta tensor.
 
+use hip_tile::KernelArg;
+
+use crate::yolo::conv::ConvParams;
+
+/// Parameters shared by the two convolution gradients.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ConvBwdParams {
+    pub conv: ConvParams,
+    /// Images in the batch; the kernels reach them by striding `conv`-shaped views.
+    pub batch: u32,
+}
+
+// SAFETY: `repr(C)` struct of `u32`s (`ConvParams` is `repr(C)` too).
+unsafe impl KernelArg for ConvBwdParams {}
+
+impl ConvBwdParams {
+    pub fn new(conv: ConvParams, batch: u32) -> Self {
+        Self { conv, batch }
+    }
+}
+
 pub mod bn_bwd;
 pub mod bn_stats;
+pub mod conv_bwd_dw;
+pub mod conv_bwd_dx;
 pub mod maxpool_bwd;
 pub mod route_bwd;
 pub mod upsample_bwd;
 pub mod util;
 
-// Still to write (ROADMAP stage 03): `conv_bwd_dw`, `conv_bwd_dx`, `yolo_delta`. They need the
-// batched im2col gather and the accumulating GEMM (a `hip-tile` op), so they land in their own
-// `add-kernel` runs rather than in this module's first slice.
+// The `[yolo]` delta stays on the host for now: it is a few hundred KB per iteration and the
+// verified implementation already exists (`hip_darknet::train::deltas`). A device version is an
+// optimisation, not a correctness requirement — see `workflows/train-darknet-model/runs/*/03_gpu-backward.md`.

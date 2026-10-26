@@ -54,11 +54,28 @@ Every gradient kernel accumulates into its destination rather than overwriting i
 
 Three real bugs were caught by these tests, which is the argument for writing them first: the flat kernels used the wrong grid axis (`grid` is `(x, y)` and `block_id()` is `(y, x)`), the maxpool gather indexed the input without its channel offset, and `bn_stats`/`bn_bwd` treated the channel stride as 1 instead of `spatial`.
 
+## Convolution gradients (written, one known failure)
+
+| Kernel | Design | State |
+|---|---|---|
+| `conv_bwd_dw` | block owns one `[Cout x Cin·k²]` tile and walks the **whole batch inside its k-loop**: `A = δ[Cout x OH·OW]`, `B = im2col(x)ᵀ` gathered on the fly, `dW` accumulated in registers from the buffer's existing contents (momentum semantics) | **correct for `cin == 1`** (verified against a hand-computed 4x4/3x3 case); **wrong for `cin > 1`**, where `Cin·k²` spans more than one `BK = 16` gather block |
+| `conv_bwd_dx` | transpose-convolution **gather**: `k²` GEMMs against `Co` folding into one register accumulator per `[Cin x positions]` tile, both operands gathered (weights are strided in both axes for a fixed tap), accumulated once via `store_tile_add` | written, parity blocked behind the same test |
+
+`apps/runner/tests/backward_ops.rs::conv_bwd_matches_cpu` carries the failing case and is marked
+`#[ignore]` with the reason, so the failure stays visible instead of being deleted.
+
+Next step on it: the `kidx → (ci, ky, kx)` mapping is already `ci = kidx/kk, rem = kidx − ci·kk,
+ky = rem/k, kx = rem − ky·k`, so the suspicion is the interaction between the `BM = 64` masked
+`delta` tile and the `BN = 64` gather when `k_total > BK`; a single-channel vs two-channel dump of
+`tb` is the shortest next experiment.
+
 ## Remaining
 
-- `conv_bwd_dw`: needs the batched im2col gather plus an accumulating GEMM (a `hip-tile` op), then one block per output tile sweeping the batch.
-- `conv_bwd_dx`: transpose-convolution gather (no scatter), with weights prepacked per `(ky, kx)`.
-- `yolo_delta`: the `[yolo]` delta tensor on device, against `train::deltas::yolo_delta` as the oracle.
+- Fix `conv_bwd_dw`/`conv_bwd_dx` parity for `cin > 1` (above), then wire them.
+- `yolo_delta` on device: **deliberately deferred**. The head tensors are a few hundred KB per
+  iteration, so the trainer can download the head outputs, run the verified host
+  `train::deltas::yolo_delta`, and upload the delta — same math, no duplicated box code. A device
+  version is a latency optimisation, not a correctness requirement.
 - Batched forward (`conv`/`maxpool`/`upsample`/`concat` at `batch > 1`) and `TrainModel` wiring (stage 04).
 
 ## Test output
