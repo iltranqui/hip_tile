@@ -45,7 +45,7 @@ Two `build.rs` files reference `../../kernels`; moving `kernels` or the two cons
 
 Each stage folder holds only its contract (`CONTEXT.md`). Each run lives in `runs/<name>/` and gets one file per finished stage, named after the stage (`01_spec.md`, …). New runs start as a copy of `_templates/kernel/`, `_templates/port-run/` or `_templates/train-run/`.
 
-The training goal, its decisions and acceptance numbers live in `ROADMAP.md`.
+The training goal, its decisions and acceptance numbers live in `docs/ROADMAP.md`.
 
 ## State
 

@@ -12,7 +12,7 @@ One job: honest speed and memory numbers for training, and every folder's CONTEX
 ## Inputs
 
 - Working (this run): all earlier stage files.
-- Reference (every run): `_shared/benchmarking.md`, `_shared/rules.md`, `README.md`, `crates/hip_darknet/CONTEXT.md`, `kernels/CONTEXT.md`, `crates/hip-tile/CONTEXT.md`, `CONTEXT.md`, `ROADMAP.md`.
+- Reference (every run): `_shared/benchmarking.md`, `_shared/rules.md`, `README.md`, `crates/hip_darknet/CONTEXT.md`, `kernels/CONTEXT.md`, `crates/hip-tile/CONTEXT.md`, `CONTEXT.md`, `docs/ROADMAP.md`.
 
 Do NOT load: other runs.
 
@@ -20,7 +20,7 @@ Do NOT load: other runs.
 
 1. Measure per `_shared/benchmarking.md`: CPU idle, warm-up, best of several repetitions, HIP events, twice. Per-iteration time, images/s, effective TFLOP/s for forward and backward separately, peak device memory, and the CPU reference trainer for scale.
 2. Update the goal table's numbers in `README.md` and, if a number becomes a new reference, `_shared/benchmarking.md`.
-3. Update the CONTEXT.md files of every folder whose file list changed, the root `CONTEXT.md` workflow table, and the status column of `ROADMAP.md`.
+3. Update the CONTEXT.md files of every folder whose file list changed, the root `CONTEXT.md` workflow table, and the status column of `docs/ROADMAP.md`.
 
 ## Outputs
 

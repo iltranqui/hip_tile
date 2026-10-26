@@ -12,7 +12,7 @@ One job: train the model from scratch and show, number by number, how it compare
 ## Inputs
 
 - Working (this run): `runs/<name>/05_cli-checkpoints.md`, the dataset's `*_loss.csv` and `*_map.csv`.
-- Reference (every run): `ROADMAP.md` (acceptance numbers), `_shared/rules.md`, `_shared/benchmarking.md` (for the wall clock statement only).
+- Reference (every run): `docs/ROADMAP.md` (acceptance numbers), `_shared/rules.md`, `_shared/benchmarking.md` (for the wall clock statement only).
 
 Do NOT load: kernel sources, the C++ porting source.
 

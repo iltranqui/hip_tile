@@ -1,6 +1,6 @@
-# docs — README assets
+# docs — README assets and the training roadmap
 
-One job: hold images referenced by `README.md`.
+Two jobs: hold images referenced by `README.md`, and hold `ROADMAP.md`, the training goal with its decisions, acceptance numbers, stages and status.
 
 ## Contents
 
@@ -9,6 +9,7 @@ One job: hold images referenced by `README.md`.
 
 ## Files
 
+- `ROADMAP.md`: training `hip_darknet` end to end (acceptance, decisions, stages, status, risks). Read by `workflows/train-darknet-model/`; update its status table when a stage finishes.
 - `legogears_gpu.png`: GPU detections on LegoGears validation image `00000082.png` (from `hip_darknet --gpu --out`).
 
 ## Rules for changes

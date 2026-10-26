@@ -1,6 +1,6 @@
 # HANDOFF — GPU training of hip_darknet
 
-State of the GPU trainer at the end of the session of 2026-10-26, for whoever picks it up next. Read `CLAUDE.md` and `ROADMAP.md` first; this file only records what changed, what is proven, and what is open.
+State of the GPU trainer at the end of the session of 2026-10-26, for whoever picks it up next. Read `CLAUDE.md` and `docs/ROADMAP.md` first; this file only records what changed, what is proven, and what is open.
 
 ## Contents
 

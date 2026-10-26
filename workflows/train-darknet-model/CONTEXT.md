@@ -2,7 +2,7 @@
 
 Trains a Darknet model from scratch (`.cfg` + a labelled dataset) through `crates/hip_darknet`, in pure Rust on the AMD GPU, and proves the result against the dataset's own reference training history. The unit of work is one model+dataset pair; each run is `runs/<name>/`.
 
-Goal, decisions, acceptance numbers and risks live in [`ROADMAP.md`](../../ROADMAP.md) — one home. This file only says how a run moves.
+Goal, decisions, acceptance numbers and risks live in [`docs/ROADMAP.md`](../../docs/ROADMAP.md) — one home. This file only says how a run moves.
 
 ## Contents
 
@@ -22,7 +22,7 @@ Goal, decisions, acceptance numbers and risks live in [`ROADMAP.md`](../../ROADM
 | `06_run/` | the full training run, compared to the dataset's reference history | trained `.weights`, `loss.csv`, `map.csv` + `runs/<name>/06_run.md` |
 | `07_bench-docs/` | speed, memory, docs | `runs/<name>/07_bench-docs.md` + CONTEXT/README updates |
 
-Every stage reads `_shared/rules.md` first: no Darknet binary ever, no inline asm, pure Rust, GPU tests before a stage counts as done. Training math is f32 end to end and the optimizer is SGD with momentum — see `ROADMAP.md` Decisions.
+Every stage reads `_shared/rules.md` first: no Darknet binary ever, no inline asm, pure Rust, GPU tests before a stage counts as done. Training math is f32 end to end and the optimizer is SGD with momentum — see `docs/ROADMAP.md` Decisions.
 
 Nothing moves to the next stage until a person has read the previous stage's run file.
 

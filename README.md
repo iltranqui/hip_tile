@@ -2,7 +2,7 @@
 
 **cuTile-style GPU kernels for AMD, written in pure Rust.** You write a kernel as operations on whole tiles. `rustc` compiles it straight to AMDGPU machine code, and `cargo` builds, embeds and launches it through HIP. There is no C++, no `hipcc` and no inline assembly.
 
-To show it works on a real model, `hip_darknet` runs a Darknet YOLOv4-tiny detector on the GPU. It's a direct Rust port, using kernels written with hip-tile.
+To show it works on a real model, `hip_darknet` runs a Darknet YOLOv4-tiny detector on the GPU, and trains it there. It's a direct Rust port, using kernels written with hip-tile.
 
 <p align="center">
   <img src="docs/legogears_gpu.png" alt="LegoGears detections computed on the Radeon 680M" width="448"><br>
@@ -19,6 +19,7 @@ To show it works on a real model, `hip_darknet` runs a Darknet YOLOv4-tiny detec
 - [Project layout](#project-layout)
 - [The tile model](#the-tile-model)
 - [hip_darknet](#hip_darknet)
+- [Training on the GPU](#training-on-the-gpu)
 - [Results](#results)
 - [Testing](#testing)
 - [Limitations and roadmap](#limitations-and-roadmap)
@@ -37,6 +38,7 @@ To show it works on a real model, `hip_darknet` runs a Darknet YOLOv4-tiny detec
 - **Fast enough to matter.**
   - The tile GEMM reaches 2.3 TFLOP/s on a 12-CU iGPU and beats rocBLAS at N=2048.
   - The YOLO detector runs at about 170 frames per second end to end.
+- **Trains on the GPU too.** A full training step (forward, `[yolo]` loss, backward, SGD with momentum) runs on the Radeon 680M iGPU (gfx1031, 12 CUs, RDNA2) at about 0.3 s per step at batch 16, against roughly 22 s per step at batch 4 on the CPU reference.
 - **Checked.** 30 GPU tests compare every kernel and every network layer with CPU references and with dataset ground truth.
 
 ## A kernel
@@ -147,9 +149,10 @@ systemd-run --user --scope -q -p MemoryHigh=3G cargo build --release -j 4
 | `crates/hip-tile-build` | `build.rs` helper: compiles the kernels crate for the GPU, embeds the ELF, sets the ROCm rpath. |
 | `crates/hip-sys` | Raw FFI to the HIP runtime (and rocBLAS behind a feature), written by hand. |
 | `crates/hip-rt` | Safe host API: `Device`, `Module`, `DeviceBuffer<T>`, `Stream`, `Event`, `Dim3`. |
-| `kernels` | Kernels: `saxpy`, `copy`, `transpose`, `gemm`; YOLO ops `conv`, `maxpool`, `upsample`, `concat`. |
+| `kernels` | Kernels: `saxpy`, `copy`, `transpose`, `gemm`; YOLO ops `conv`, `maxpool`, `upsample`, `concat`; training ops (`backward/`): conv and batch-norm forward/backward, maxpool/upsample/route backward, `[yolo]` activation and deltas, SGD update. |
 | `apps/runner` | Kernel tests, the GEMM benchmark (`gemm --bench`) and the conv benchmark (`conv-bench`). |
-| `crates/hip_darknet` | Darknet YOLO in Rust: cfg/weights loader, CPU reference, YOLO decode with NMS, GPU executor, CLI. |
+| `crates/hip_darknet` | Darknet YOLO in Rust: cfg/weights loader, CPU reference, YOLO decode with NMS, GPU executor, CPU and GPU trainers, mAP evaluation, CLI. |
+| `xtask` | `cargo xtask train_hip_legogears`: builds `hip_darknet` and runs GPU training on LegoGears. |
 | `_shared` | Project rules and settled technical reference: tile model, Darknet semantics, benchmark method. |
 | `workflows` | The two repeatable workflows (`add-kernel`, `port-darknet-model`) with stage contracts and a record of each run. |
 | `_templates` | Starters for a new kernel or a new model port. |
@@ -174,7 +177,7 @@ The full model, including the nightly-Rust details it depends on, is in [`_share
 
 ## hip_darknet
 
-This is a direct port of Darknet's inference path. It never runs the Darknet binary: Darknet's C++ source was read to copy its behaviour exactly, and everything is checked with Rust tests.
+This is a direct port of Darknet's inference path, and of its training path (see [Training on the GPU](#training-on-the-gpu)). It never runs the Darknet binary: Darknet's C++ source was read to copy its behaviour exactly, and everything is checked with Rust tests.
 
 - **Loading.** It reads `.cfg` files and `.weights` files (all header versions) and folds batch normalization into the conv weights, in f64 with Darknet's ε = 1e-5. It checks that the weights file is consumed exactly to the end.
 - **Layers:** `convolutional` (leaky/linear), `maxpool` (Darknet padding rules), `route` (concat and `groups`/`group_id` slices), `upsample`, `yolo` (`scale_x_y`).
@@ -186,6 +189,25 @@ This is a direct port of Darknet's inference path. It never runs the Darknet bin
 - **CLI flags:** `--gpu`, `--out` (annotated image or directory), `--bench N`, `--thresh`, `--nms`. Build with `--no-default-features` for a CPU-only binary.
 
 More detail: [`crates/hip_darknet/README.md`](crates/hip_darknet/README.md).
+
+## Training on the GPU
+
+All training numbers here come from one machine: a Radeon 680M iGPU (gfx1031, 12 CUs, RDNA2) with about 7.4 GB of RAM shared between the GPU and the CPU, under WSL2. That shared memory is why training uses subdivisions (below).
+
+`GpuTrainNet` (`crates/hip_darknet/src/train/gpu.rs`) runs a complete Darknet training step on the GPU: batched forward with batch-norm statistics, the `[yolo]` loss and deltas, backward, and SGD with momentum and weight decay. The weights, momentum buffers and activations stay on the device. A CPU trainer (`TrainNet`) serves as the reference, and every stage is tested against it on the real `LegoGears_v2.cfg`.
+
+```sh
+cargo xtask train_hip_legogears                      # the cfg's schedule, subdivisions 2, mAP off
+cargo xtask train_hip_legogears --map                # mAP every 100 iterations once burn-in is over
+cargo xtask train_hip_legogears --weights W.weights  # fine-tune; the schedule continues from the weights' `seen`
+cargo xtask --help                                   # all options
+```
+
+- **Subdivisions.** `--subdivisions N` (default 2) runs `batch / N` images per pass and accumulates the gradients, so a batch of 16 fits the iGPU's shared memory. One SGD update follows per step.
+- **Output.** The run prints the loss (blue when it fell, red when it rose), saves `iter_NNNNNN.weights` and `last.state` every 100 iterations, and writes `loss.csv` and `map.csv` to `target/legogears_v2_gpu`.
+- **mAP.** Evaluation also runs on the GPU. It decodes at confidence 0.005 for AP and then prints a per-class table of TP, FP, FN, GT, F1 and average IoU at confidence 0.25 and IoU 0.5. A detector has no countable true negatives, so there is no TN column.
+- **Checked against the CPU trainer** (batch 2, `LegoGears_v2.cfg`): forward on all 38 layers within 2.2e-5 of the CPU, the network loss equal to 6 digits, gradients and the weights after an SGD step within 7.3e-6 (relative to the tensor's largest value).
+- **A bug worth knowing about.** Parity tests cannot catch a mistake that the CPU reference and the kernel share. Both once set only the truth class's delta in a positive `[yolo]` cell, instead of pushing the other classes toward 0 as Darknet's `delta_yolo_class` does. Every box then scored all five classes high: about 4 false positives per object and mAP@0.5 of 0.83. Fixing it brought the false positives from about 613 to 7 (see [Results](#results)).
 
 ## Results
 
@@ -206,11 +228,25 @@ All numbers: Radeon 680M iGPU (gfx1031, 12 CUs, RDNA2), f32. The iGPU shares its
 | GPU vs CPU detections, 10 images | identical (count, class, IoU ≥ 0.99, confidence within 1e-3) |
 | Detections vs dataset labels, 10 images, 38 objects, IoU 0.5 | recall 1.000, precision 1.000, 0 class errors |
 
+GPU training on LegoGears (80 images, 5 classes), same Radeon 680M iGPU:
+
+| Benchmark | Result |
+|---|---|
+| Training step, batch 16 as 2 passes of 8, including loading and augmentation | about 0.3 s |
+| Training step, batch 4: GPU vs CPU reference | about 0.1 s vs about 22 s |
+| mAP evaluation of the 80 validation images, on the GPU | about 1 s |
+| After the class-delta fix, iteration 2500 of a run in progress: mAP@0.5, mAP@0.5:0.95 | 0.9928, 0.563 |
+| Same point, at confidence 0.25 and IoU 0.5: TP, FP, FN (152 truths) | 151, 7, 1 (F1 97.4%) |
+| Before the fix, iteration 2600: mAP@0.5, FP | 0.83, 614 |
+
+The train and validation lists are the same 80 images, so these are scores on images the network trains on. The run had not finished when this was written, and the longer acceptance checks (loss band, reproducibility, final mAP) are still open in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ## Testing
 
 ```sh
 cargo test -p runner --release                        # 28 GPU kernel tests
 cargo test -p hip_darknet --release -- --nocapture    # unit, ground-truth, per-layer and detection parity
+cargo test -p hip_darknet --release --test train_gpu  # GPU training step vs the CPU trainer
 cargo test -p hip_darknet --release --no-default-features   # CPU-only build
 cargo clippy --workspace --all-targets
 ```
@@ -226,6 +262,13 @@ The model tests skip themselves, with a message, if the LegoGears dataset is not
 - **f32 and f64 only.** No f16 or bf16 yet, and no packed math (`v_pk_fma_f16`, `v_dot2_f32_f16`).
 - **No matrix cores.** WMMA (gfx11) and MFMA (CDNA) are not used, so RDNA3 and CDNA GPUs get the FMA path.
 - **One architecture per build,** chosen with `HIP_TILE_ARCH`; there is no multi-architecture binary or runtime JIT.
+- **GPU training limits.**
+  - At most 200 ground-truth boxes per image.
+  - Only `linear` and `leaky` conv activations.
+  - `iou_loss=mse` heads are refused on the GPU: the device result differs from the host on a few entries.
+  - Batch is handled as one launch per image, so a fused batched kernel could be faster.
+  - The training loss is formed on the host each step.
+  - The reported mAP covers a short stretch of one run so far; it is not yet a finished acceptance result.
 - **Next steps:**
   - Split the K loop across blocks for the small 7×5 YOLO layers.
   - Let route outputs be written directly into concatenation buffers.

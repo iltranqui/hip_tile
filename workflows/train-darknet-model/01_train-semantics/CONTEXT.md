@@ -12,7 +12,7 @@ One job: every training behaviour this run depends on is read out of Darknet's C
 ## Inputs
 
 - Working (this run): the model's `.cfg`, `.data`, `.names`, train/valid lists, label files, and the dataset's `*_loss.csv` / `*_map.csv` reference history (paths in `runs/<name>/01_train-semantics.md`).
-- Reference (every run): `_shared/rules.md`, `_shared/darknet-semantics.md`, `ROADMAP.md`, `crates/hip_darknet/CONTEXT.md`.
+- Reference (every run): `_shared/rules.md`, `_shared/darknet-semantics.md`, `docs/ROADMAP.md`, `crates/hip_darknet/CONTEXT.md`.
 - Porting source (read only): `~/src/DarkSuite/darknet/src-lib/` — `yolo_layer.cpp`, `batchnorm_layer.cpp`, `convolutional_layer.cpp`, `blas.cpp`, `darknet_network.cpp`, `darknet_cfg.cpp`, `data.cpp`, `image_opencv.cpp`, `detector.cpp`.
 
 Do NOT load: `kernels/`, anything GPU, `/usr/bin/darknet` (never run it).

@@ -2,7 +2,7 @@
 
 The goal: train a Darknet YOLO model **from scratch** on a labelled dataset and prove the result, entirely in Rust on the AMD GPU — no C/C++, no `hipcc`, no Darknet binary. The first target is `LegoGears_v2` (5 classes, 224×160, YOLOv4-tiny-shaped cfg).
 
-Implementation lives in `crates/hip_darknet` (grown, not a new crate) with every new GPU primitive as a tile op in `crates/hip-tile`. Process lives in [`workflows/train-darknet-model/`](workflows/train-darknet-model/CONTEXT.md); the current run is `workflows/train-darknet-model/runs/legogears_v2/`.
+Implementation lives in `crates/hip_darknet` (grown, not a new crate) with every new GPU primitive as a tile op in `crates/hip-tile`. Process lives in [`workflows/train-darknet-model/`](../workflows/train-darknet-model/CONTEXT.md); the current run is `workflows/train-darknet-model/runs/legogears_v2/`.
 
 ## Contents
 
@@ -49,13 +49,13 @@ Recorded because they constrain every stage; change them here, not in code.
 
 | # | Stage | Gate before moving on | Contract |
 |---|---|---|---|
-| 01 | training semantics | facts cited from Darknet's C++, loss scaling pinned | [`01_train-semantics/`](workflows/train-darknet-model/01_train-semantics/CONTEXT.md) |
-| 02 | CPU backward (f32) | CIoU two-formula agreement + finite differences + analytic identities, all at stated tolerances | [`02_cpu-backward/`](workflows/train-darknet-model/02_cpu-backward/CONTEXT.md) |
-| 03 | tile ops + GPU kernels | GPU vs CPU parity per op/kernel, FD where it applies, batch-1 inference suites unchanged | [`03_gpu-backward/`](workflows/train-darknet-model/03_gpu-backward/CONTEXT.md) |
-| 04 | GPU training step | GPU gradients == CPU gradients, loss match, timing probe accepted | [`04_executor/`](workflows/train-darknet-model/04_executor/CONTEXT.md) |
-| 05 | CLI, checkpoints, metrics | weights round trip, csv schema matches the reference, resume equality | [`05_cli-checkpoints/`](workflows/train-darknet-model/05_cli-checkpoints/CONTEXT.md) |
-| 06 | the run | the acceptance table above | [`06_run/`](workflows/train-darknet-model/06_run/CONTEXT.md) |
-| 07 | bench + docs | numbers per method, every CONTEXT.md true again | [`07_bench-docs/`](workflows/train-darknet-model/07_bench-docs/CONTEXT.md) |
+| 01 | training semantics | facts cited from Darknet's C++, loss scaling pinned | [`01_train-semantics/`](../workflows/train-darknet-model/01_train-semantics/CONTEXT.md) |
+| 02 | CPU backward (f32) | CIoU two-formula agreement + finite differences + analytic identities, all at stated tolerances | [`02_cpu-backward/`](../workflows/train-darknet-model/02_cpu-backward/CONTEXT.md) |
+| 03 | tile ops + GPU kernels | GPU vs CPU parity per op/kernel, FD where it applies, batch-1 inference suites unchanged | [`03_gpu-backward/`](../workflows/train-darknet-model/03_gpu-backward/CONTEXT.md) |
+| 04 | GPU training step | GPU gradients == CPU gradients, loss match, timing probe accepted | [`04_executor/`](../workflows/train-darknet-model/04_executor/CONTEXT.md) |
+| 05 | CLI, checkpoints, metrics | weights round trip, csv schema matches the reference, resume equality | [`05_cli-checkpoints/`](../workflows/train-darknet-model/05_cli-checkpoints/CONTEXT.md) |
+| 06 | the run | the acceptance table above | [`06_run/`](../workflows/train-darknet-model/06_run/CONTEXT.md) |
+| 07 | bench + docs | numbers per method, every CONTEXT.md true again | [`07_bench-docs/`](../workflows/train-darknet-model/07_bench-docs/CONTEXT.md) |
 
 Nothing moves to the next stage until a person has read the previous stage's run file.
 
