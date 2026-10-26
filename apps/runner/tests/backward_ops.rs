@@ -7,6 +7,7 @@ use kernels::backward::bn_bwd::{BnBwdParams, launch_bn_bwd};
 use kernels::backward::ConvBwdParams;
 use kernels::backward::conv_bwd_dw::launch_conv_bwd_dw;
 use kernels::backward::conv_bwd_dx::launch_conv_bwd_dx;
+use kernels::backward::bn_fwd::{BnFwdParams, launch_bn_fwd};
 use kernels::backward::bn_stats::{BnStatsParams, launch_bn_stats};
 use kernels::backward::maxpool_bwd::launch_maxpool_bwd;
 use kernels::backward::route_bwd::launch_route_bwd;
@@ -525,4 +526,59 @@ fn conv_bwd_matches_cpu_batched() {
     check_conv_bwd(ConvCase { cin: 3, cout: 4, h: 8, w: 8, k: 3, stride: 2, pad: 0, batch: 2 });
     check_conv_bwd(ConvCase { cin: 5, cout: 6, h: 4, w: 4, k: 1, stride: 1, pad: 0, batch: 2 });
     check_conv_bwd(ConvCase { cin: 4, cout: 20, h: 10, w: 9, k: 3, stride: 1, pad: 1, batch: 2 });
+}
+
+/// `bn_stats` → `bn_fwd` against the f64 formulas: `xhat = (x − m)/sqrt(var + 1e-5)`,
+/// `y = act(xhat·scale + bias)`, over a batch, linear and leaky.
+#[test]
+fn bn_fwd_matches_cpu() {
+    let (_dev, module) = runner::load().unwrap();
+    let (batch, c, spatial) = (3usize, 4usize, 37usize);
+    let len = batch * c * spatial;
+    // A non-zero channel mean makes the one-pass variance honest.
+    let x: Vec<f32> = signed(len, 71).iter().enumerate().map(|(i, v)| v + 2.0 * ((i / spatial) % c) as f32).collect();
+    let scale = vec![1.5f32, -0.75, 0.5, 2.0];
+    let bias = vec![0.25f32, -0.5, 1.0, 0.0];
+    let (mean, var) = bn_cpu(&x, batch, c, spatial);
+    for act in [ConvParams::LINEAR, ConvParams::LEAKY] {
+        let (bx, bs, bb) = (
+            DeviceBuffer::from_slice(&x).unwrap(),
+            DeviceBuffer::from_slice(&scale).unwrap(),
+            DeviceBuffer::from_slice(&bias).unwrap(),
+        );
+        let mut bm = DeviceBuffer::zeroed(c).unwrap();
+        let mut bv = DeviceBuffer::zeroed(c).unwrap();
+        let mut bxh = DeviceBuffer::from_slice(&vec![-9.0f32; len]).unwrap();
+        let mut by = DeviceBuffer::from_slice(&vec![-9.0f32; len]).unwrap();
+        let xv = Tensor::new(bx.as_ptr(), c as u32, spatial as u32, (c * spatial) as u32);
+        launch_bn_stats(&module, None, xv, bm.tensor_mut(1, c as u32), bv.tensor_mut(1, c as u32), &BnStatsParams { batch: batch as u32, spatial: spatial as u32 }).unwrap();
+        let flat = Tensor::vector(bx.as_ptr(), len as u32);
+        let p = BnFwdParams { channels: c as u32, spatial: spatial as u32, act };
+        launch_bn_fwd(
+            &module, None, flat,
+            Tensor::vector(bm.as_ptr(), c as u32), Tensor::vector(bv.as_ptr(), c as u32),
+            Tensor::vector(bs.as_ptr(), c as u32), Tensor::vector(bb.as_ptr(), c as u32),
+            TensorMut::vector(bxh.as_mut_ptr(), len as u32), TensorMut::vector(by.as_mut_ptr(), len as u32), &p,
+        ).unwrap();
+        let (mut want_xh, mut want_y) = (vec![0f64; len], vec![0f64; len]);
+        for b in 0..batch {
+            for ch in 0..c {
+                let inv = 1.0 / (var[ch] + 1e-5).sqrt();
+                for j in 0..spatial {
+                    let i = (b * c + ch) * spatial + j;
+                    let xh = (f64::from(x[i]) - mean[ch]) * inv;
+                    let mut y = xh * f64::from(scale[ch]) + f64::from(bias[ch]);
+                    if act == ConvParams::LEAKY && y < 0.0 {
+                        y *= 0.1;
+                    }
+                    want_xh[i] = xh;
+                    want_y[i] = y;
+                }
+            }
+        }
+        let e_xh = rel_err_64(&bxh.copy_to_vec().unwrap().iter().map(|v| f64::from(*v)).collect::<Vec<_>>(), &want_xh);
+        let e_y = rel_err_64(&by.copy_to_vec().unwrap().iter().map(|v| f64::from(*v)).collect::<Vec<_>>(), &want_y);
+        assert!(e_xh < 1e-4, "bn_fwd xhat act {act}: {e_xh:e}");
+        assert!(e_y < 1e-4, "bn_fwd y act {act}: {e_y:e}");
+    }
 }

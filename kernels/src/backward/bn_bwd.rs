@@ -21,7 +21,7 @@ pub const BN_EPS: f32 = 1e-5;
 /// (`gpu_intrinsics` / `core_intrinsics` are enabled for that target in `hip-tile`).
 #[cfg(target_arch = "amdgpu")]
 #[inline(always)]
-fn sqrtf(x: f32) -> f32 {
+pub(crate) fn sqrtf(x: f32) -> f32 {
     core::intrinsics::sqrt::<f32>(x)
 }
 

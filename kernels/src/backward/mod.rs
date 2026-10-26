@@ -10,7 +10,7 @@
 //! - [`util`]: fill, accumulate, the SGD step, rolling BN statistics.
 //! - [`maxpool_bwd`], [`upsample_bwd`]: gather formulations, race-free without atomics.
 //! - [`route_bwd`]: channel-block accumulate for route/concat fan-in.
-//! - [`bn_stats`], [`bn_bwd`]: batch-norm statistics and gradients.
+//! - [`bn_stats`], [`bn_fwd`], [`bn_bwd`]: batch-norm statistics, forward and gradients.
 //! - [`conv_bwd_dw`], [`conv_bwd_dx`]: the two convolution gradients.
 //! - [`yolo_delta`]: the `[yolo]` delta tensor.
 
@@ -37,6 +37,7 @@ impl ConvBwdParams {
 }
 
 pub mod bn_bwd;
+pub mod bn_fwd;
 pub mod bn_stats;
 pub mod conv_bwd_dw;
 pub mod conv_bwd_dx;
