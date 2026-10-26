@@ -315,3 +315,24 @@ fn lr_schedule_burn_in_and_steps() {
     cfg.policy = hip_darknet::cfg::LrPolicy::Constant;
     assert_eq!(learning_rate(&cfg, 7), 0.00261);
 }
+
+/// Regression: maxpool forward/backward once ignored the batch and only handled image 0, which no
+/// `batch = 1` test could see. A batch must equal its images run one by one.
+#[test]
+fn maxpool_batched_equals_per_image() {
+    let cfg = "[net]\nwidth=6\nheight=5\nchannels=2\nbatch=1\n[maxpool]\nsize=2\nstride=2\n";
+    let (batch, mut batched) = (3, build(cfg, 3, 41));
+    let per = batched.input.len() / batch;
+    let x = fill_pattern(batched.input.len(), 43);
+    let last = batched.model.layers.len() - 1;
+    let out_per = batched.outs[last].len() / batch;
+    let g = fill_pattern(batched.outs[last].len(), 47);
+    let got_dx = analytic_input_grad(&mut batched, &x, last, &g);
+    let got_out = batched.outs[last].clone();
+    for b in 0..batch {
+        let mut single = build(cfg, 1, 41);
+        let dx = analytic_input_grad(&mut single, &x[b * per..(b + 1) * per], last, &g[b * out_per..(b + 1) * out_per]);
+        assert_eq!(&got_out[b * out_per..(b + 1) * out_per], &single.outs[last][..], "forward, image {b}");
+        assert_eq!(&got_dx[b * per..(b + 1) * per], &dx[..], "backward, image {b}");
+    }
+}

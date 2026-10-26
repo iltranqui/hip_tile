@@ -183,7 +183,7 @@ impl TrainNet {
                 LayerKind::Maxpool(m) => {
                     let prev: &[f32] = if i == 0 { &self.input } else { &self.outs[i - 1] };
                     let idx = self.pool_idx[i].as_mut().expect("pool idx");
-                    maxpool_forward(prev, &mut dst, idx, ins, shape, m);
+                    maxpool_forward(prev, &mut dst, idx, ins, shape, m, batch);
                 }
                 LayerKind::Route { sources, groups, group_id } => {
                     route_forward(&self.outs, &mut dst, sources, *groups, *group_id, model, batch, shape);
@@ -306,9 +306,9 @@ impl TrainNet {
                 LayerKind::Maxpool(m) => {
                     let idx = self.pool_idx[i].as_deref().expect("pool idx");
                     if i == 0 {
-                        maxpool_backward(&delta, &mut self.input_grad, idx, ins, m);
+                        maxpool_backward(&delta, &mut self.input_grad, idx, ins, m, batch);
                     } else {
-                        maxpool_backward(&delta, &mut self.grads[i - 1], idx, ins, m);
+                        maxpool_backward(&delta, &mut self.grads[i - 1], idx, ins, m, batch);
                     }
                 }
                 LayerKind::Route { sources, groups, group_id } => {
@@ -669,49 +669,55 @@ fn conv_backward(
     }
 }
 
-fn maxpool_forward(input: &[f32], out: &mut [f32], idx: &mut [u32], ins: Shape, outs: Shape, m: &MaxpoolCfg) {
+fn maxpool_forward(input: &[f32], out: &mut [f32], idx: &mut [u32], ins: Shape, outs: Shape, m: &MaxpoolCfg, batch: usize) {
     let off = -((m.padding / 2) as isize);
-    for c in 0..outs.c {
-        for oy in 0..outs.h {
-            for ox in 0..outs.w {
-                let mut best = -f32::MAX;
-                let mut best_i = 0u32;
-                for ky in 0..m.size {
-                    for kx in 0..m.size {
-                        let iy = off + (oy * m.stride + ky) as isize;
-                        let ix = off + (ox * m.stride + kx) as isize;
-                        if iy >= 0 && iy < ins.h as isize && ix >= 0 && ix < ins.w as isize {
-                            let p = iy as usize * ins.w + ix as usize;
-                            let v = input[(c * ins.h + iy as usize) * ins.w + ix as usize];
-                            if v > best {
-                                best = v;
-                                best_i = p as u32;
+    for b in 0..batch {
+        let (ib, ob) = (b * ins.len(), b * outs.len());
+        for c in 0..outs.c {
+            for oy in 0..outs.h {
+                for ox in 0..outs.w {
+                    let mut best = -f32::MAX;
+                    let mut best_i = 0u32;
+                    for ky in 0..m.size {
+                        for kx in 0..m.size {
+                            let iy = off + (oy * m.stride + ky) as isize;
+                            let ix = off + (ox * m.stride + kx) as isize;
+                            if iy >= 0 && iy < ins.h as isize && ix >= 0 && ix < ins.w as isize {
+                                let p = iy as usize * ins.w + ix as usize;
+                                let v = input[ib + (c * ins.h + iy as usize) * ins.w + ix as usize];
+                                if v > best {
+                                    best = v;
+                                    best_i = p as u32;
+                                }
                             }
                         }
                     }
+                    out[ob + (c * outs.h + oy) * outs.w + ox] = if best == -f32::MAX { 0.0 } else { best };
+                    idx[ob + (c * outs.h + oy) * outs.w + ox] = best_i;
                 }
-                out[(c * outs.h + oy) * outs.w + ox] = if best == -f32::MAX { 0.0 } else { best };
-                idx[(c * outs.h + oy) * outs.w + ox] = best_i;
             }
         }
     }
 }
 
-fn maxpool_backward(delta: &[f32], prev_grad: &mut [f32], idx: &[u32], ins: Shape, m: &MaxpoolCfg) {
+fn maxpool_backward(delta: &[f32], prev_grad: &mut [f32], idx: &[u32], ins: Shape, m: &MaxpoolCfg, batch: usize) {
     let outs = Shape {
         c: ins.c,
         h: (ins.h + m.padding - m.size) / m.stride + 1,
         w: (ins.w + m.padding - m.size) / m.stride + 1,
     };
-    for c in 0..outs.c {
-        for oy in 0..outs.h {
-            for ox in 0..outs.w {
-                let d = delta[(c * outs.h + oy) * outs.w + ox];
-                if d == 0.0 {
-                    continue;
+    for b in 0..batch {
+        let (ib, ob) = (b * ins.len(), b * outs.len());
+        for c in 0..outs.c {
+            for oy in 0..outs.h {
+                for ox in 0..outs.w {
+                    let d = delta[ob + (c * outs.h + oy) * outs.w + ox];
+                    if d == 0.0 {
+                        continue;
+                    }
+                    let p = idx[ob + (c * outs.h + oy) * outs.w + ox] as usize;
+                    prev_grad[ib + c * ins.h * ins.w + p] += d;
                 }
-                let p = idx[(c * outs.h + oy) * outs.w + ox] as usize;
-                prev_grad[c * ins.h * ins.w + p] += d;
             }
         }
     }
