@@ -65,7 +65,7 @@ Nothing moves to the next stage until a person has read the previous stage's run
 |---|---|---|
 | 01 training semantics | written, awaiting the human read | `runs/legogears_v2/01_train-semantics.md` |
 | 02 CPU backward | **done** — 11 numeric gradient checks + 49 unit tests + learning check pass | `runs/legogears_v2/02_cpu-backward.md` |
-| 03 tile ops + kernels | not started (needs `hip-tile` ops: accumulating store, channel reduction, batched addressing, accumulating GEMM) | — |
+| 03 tile ops + kernels | **first slice done** — `store_tile_add` + 9 kernels (util, maxpool/upsample/route gradients, BN stats and backward) GPU-verified; conv gradients and `[yolo]` delta remain | `runs/legogears_v2/03_gpu-backward.md` |
 | 04 GPU training step | not started | — |
 | 05 CLI, checkpoints, metrics | **done** except split-run resume (needs a long run) — the CPU-side of it | `runs/legogears_v2/05_cli-checkpoints.md` |
 | 06 the run | blocked on 03/04 for the 12 000-iteration budget; dataset caveats recorded in stage 05 | — |

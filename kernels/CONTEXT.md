@@ -14,6 +14,7 @@ One job: hold every `#[kernel]`, built for the device (ELF) and for the host (la
 - `src/lib.rs`: module list; `#![no_std]`.
 - `saxpy.rs`, `copy.rs`, `transpose.rs`, `gemm.rs` (128×128×16).
 - `yolo/`: `conv.rs` (implicit GEMM, 5 tile configs, `Config::choose`, `ConvParams`), `maxpool.rs` (`PoolParams`), `upsample.rs`, `concat.rs`.
+- `backward/`: training gradients — `util.rs` (zero/axpy/acc, `SgdParams` + `sgd_update`, `running_update`), `maxpool_bwd.rs`, `upsample_bwd.rs`, `route_bwd.rs`, `bn_stats.rs`, `bn_bwd.rs`. Gradient kernels accumulate (`store_tile_add`), never overwrite.
 - Each kernel's record: `workflows/add-kernel/runs/<name>/`.
 
 ## Dependencies
@@ -30,4 +31,4 @@ One job: hold every `#[kernel]`, built for the device (ELF) and for the host (la
 
 ## Human check
 
-The kernel has a passing parity test in `apps/runner/tests` and a run folder.
+The kernel has a passing parity test in `apps/runner/tests` and a run folder (`backward` kernels: `apps/runner/tests/backward_ops.rs`).

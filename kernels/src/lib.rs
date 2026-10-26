@@ -5,8 +5,9 @@
 //! `::core`, and a `no_std` crate may depend on a `std` one.
 
 #![no_std]
-#![cfg_attr(target_arch = "amdgpu", feature(abi_gpu_kernel))]
+#![cfg_attr(target_arch = "amdgpu", feature(abi_gpu_kernel, core_intrinsics))]
 
+pub mod backward;
 pub mod copy;
 pub mod gemm;
 pub mod saxpy;

@@ -80,4 +80,44 @@ impl<T: Element> TensorMut<T> {
             });
         }
     }
+
+}
+
+/// Accumulating stores need `AddAssign`; kept in their own impl so `load_tile`/`store_tile`
+/// stay available for every `Element`.
+impl<T: Element + core::ops::AddAssign> TensorMut<T> {
+    /// Store `tile` **added** to the destination (its top-left element at `(r0, c0)`).
+    ///
+    /// The accumulating counterpart of [`Self::store_tile`]; needed wherever several blocks or
+    /// several layers contribute to one gradient buffer (route/concat fan-in, `dX` accumulation).
+    #[inline(always)]
+    pub fn store_tile_add<const M: usize, const N: usize>(
+        &self,
+        r0: u32,
+        c0: u32,
+        tile: &Tile<T, M, N>,
+    ) {
+        let (ld, rows, cols) = (
+            self.ld() as usize,
+            self.rows() as usize,
+            self.cols() as usize,
+        );
+        // SAFETY: as in `store_tile`; masked writes stay inside the tensor.
+        let base = unsafe { self.ptr().add(r0 as usize * ld + c0 as usize) };
+        if fits(r0, c0, M, N, self.rows(), self.cols()) {
+            Tile::<T, M, N>::for_each_owned(|s, r, c| unsafe {
+                *base.add(r * ld + c) += tile.frag[s]
+            });
+        } else {
+            let (rmax, cmax) = (
+                rows.saturating_sub(r0 as usize),
+                cols.saturating_sub(c0 as usize),
+            );
+            Tile::<T, M, N>::for_each_owned(|s, r, c| {
+                if r < rmax && c < cmax {
+                    unsafe { *base.add(r * ld + c) += tile.frag[s] };
+                }
+            });
+        }
+    }
 }
