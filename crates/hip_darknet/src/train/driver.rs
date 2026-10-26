@@ -1,9 +1,10 @@
 //! The training loop: sample → augment → forward → deltas → backward → SGD, with `loss.csv`,
 //! `map.csv`, Darknet-format checkpoints and resume.
 //!
-//! This is the CPU device. The GPU trainer (stages 03/04 of `ROADMAP.md`) plugs into the same
-//! loop through [`crate::train::net::TrainNet`]'s interface, so the file formats and the schedule
-//! do not change between devices.
+//! Two devices share this loop: the CPU reference ([`TrainNet`]) and, with `opts.gpu`, the GPU
+//! trainer ([`crate::train::gpu::GpuTrainNet`]). The GPU net is created from the CPU net (so
+//! `--weights`/`--resume` apply to both) and copied back into it at every checkpoint and mAP
+//! evaluation, so the file formats and the schedule do not change between devices.
 
 use crate::augment::{Augment, Rng};
 use crate::cfg::Cfg;
@@ -12,9 +13,20 @@ use crate::error::{Error, Result};
 use crate::train::checkpoint;
 use crate::train::net::{learning_rate, TrainNet};
 use crate::yolo::DetectOptions;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// Formats a loss value, blue when it fell versus `prev` and red when it rose.
+/// Plain text when stderr is not a terminal or on the first iteration.
+fn trend(value: f32, prev: f32, first: bool) -> String {
+    let text = format!("{value:.4}");
+    if first || !std::io::stderr().is_terminal() {
+        return text;
+    }
+    let code = if value < prev { 34 } else if value > prev { 31 } else { return text };
+    format!("\x1b[{code}m{text}\x1b[0m")
+}
 
 /// What a run should do.
 #[derive(Debug, Clone)]
@@ -23,6 +35,8 @@ pub struct TrainOptions {
     pub iters: usize,
     /// Images per step; overrides the cfg's `batch` when `Some`.
     pub batch: Option<usize>,
+    /// Passes per step, each of `batch / subdivisions` images; overrides the cfg's when `Some`.
+    pub subdivisions: Option<usize>,
     pub seed: u64,
     pub save_every: usize,
     pub eval_every: usize,
@@ -33,6 +47,8 @@ pub struct TrainOptions {
     pub resume: Option<PathBuf>,
     /// Evaluate the validation split (mAP) as the run goes.
     pub eval: bool,
+    /// Train on the AMD GPU instead of the CPU reference (needs the `gpu` feature).
+    pub gpu: bool,
 }
 
 impl Default for TrainOptions {
@@ -40,13 +56,15 @@ impl Default for TrainOptions {
         TrainOptions {
             iters: 100,
             batch: None,
+            subdivisions: None,
             seed: 1,
-            save_every: 500,
+            save_every: 100,
             eval_every: 1000,
             out_dir: PathBuf::from("."),
             init_weights: None,
             resume: None,
             eval: false,
+            gpu: false,
         }
     }
 }
@@ -132,10 +150,109 @@ pub const LOSS_CSV_HEADER: &str = "iteration,seen,loss,avg_loss,loss_per_image,l
 /// `map.csv` header, matching the reference dataset's columns.
 pub const MAP_CSV_HEADER: &str = "iteration,seen,iou,threshold,map,best_map";
 
-/// Run the training loop on the CPU.
+#[cfg(feature = "gpu")]
+type GpuHandle = crate::train::gpu::GpuTrainNet;
+#[cfg(not(feature = "gpu"))]
+type GpuHandle = ();
+
+#[cfg(feature = "gpu")]
+fn start_gpu(want: bool, net: &TrainNet) -> Result<Option<GpuHandle>> {
+    if !want {
+        return Ok(None);
+    }
+    crate::train::gpu::GpuTrainNet::from_net(net).map(Some)
+}
+
+#[cfg(not(feature = "gpu"))]
+fn start_gpu(want: bool, _net: &TrainNet) -> Result<Option<GpuHandle>> {
+    if want {
+        return Err(Error::Unsupported("--gpu: this build has no `gpu` feature".into()));
+    }
+    Ok(None)
+}
+
+/// Forward, loss and backward of one pass on the device; returns the pass loss. The gradients
+/// accumulate in the momentum buffers until [`gpu_update`].
+#[cfg(feature = "gpu")]
+fn gpu_pass(g: &mut GpuHandle, input: &[f32], truths: &[Vec<crate::data::BoxLabel>]) -> Result<f32> {
+    g.zero_grads()?;
+    g.forward(input)?;
+    let loss = g.loss_and_deltas(truths)?;
+    g.backward()?;
+    Ok(loss)
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_pass(_: &mut GpuHandle, _: &[f32], _: &[Vec<crate::data::BoxLabel>]) -> Result<f32> {
+    unreachable!("start_gpu refuses without the gpu feature")
+}
+
+/// The SGD step on the device, once per iteration after all passes.
+#[cfg(feature = "gpu")]
+fn gpu_update(g: &mut GpuHandle, lr: f32) -> Result<()> {
+    g.update(lr)
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_update(_: &mut GpuHandle, _: f32) -> Result<()> {
+    unreachable!("start_gpu refuses without the gpu feature")
+}
+
+/// Load and augment the images at `picks` into one NCHW input and their ground truths.
+fn prepare_pass(
+    rng: &mut Rng,
+    ds: &Dataset,
+    aug: &Augment,
+    picks: &[usize],
+    net_w: usize,
+    net_h: usize,
+) -> Result<(Vec<f32>, Vec<Vec<crate::data::BoxLabel>>)> {
+    let mut input = Vec::with_capacity(picks.len() * 3 * net_h * net_w);
+    let mut truths = Vec::with_capacity(picks.len());
+    for &idx in picks {
+        let sample: &Sample = &ds.train[idx];
+        let img = ds.image(sample)?;
+        let prep = crate::augment::prepare(rng, &img, &sample.labels, net_w as u32, net_h as u32, aug);
+        if prep.data.len() != 3 * net_h * net_w {
+            return Err(Error::Model(format!(
+                "{}: prepared image has {} floats, expected {} (cfg channels must be 3)",
+                sample.image.display(),
+                prep.data.len(),
+                3 * net_h * net_w
+            )));
+        }
+        input.extend_from_slice(&prep.data);
+        truths.push(prep.labels);
+    }
+    Ok((input, truths))
+}
+
+/// Copy the device parameters back into the CPU net (checkpoints, evaluation).
+#[cfg(feature = "gpu")]
+fn gpu_sync(g: &GpuHandle, net: &mut TrainNet) -> Result<()> {
+    g.download_into(net)
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_sync(_: &GpuHandle, _: &mut TrainNet) -> Result<()> {
+    unreachable!("start_gpu refuses without the gpu feature")
+}
+
+/// Run the training loop on the CPU, or on the GPU with `opts.gpu`.
 pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummary> {
     let classes = ds.classes;
-    let batch = opts.batch.unwrap_or(cfg.train.batch).max(1);
+    // Darknet's `batch` is the images per optimizer step; each pass holds `batch / subdivisions`.
+    let full = opts.batch.unwrap_or(cfg.train.batch).max(1);
+    let subdiv = opts.subdivisions.unwrap_or(cfg.train.subdivisions).max(1);
+    if !full.is_multiple_of(subdiv) {
+        return Err(Error::Model(format!("batch {full} is not divisible by subdivisions {subdiv}")));
+    }
+    let batch = full / subdiv;
+    // The net's `effective_batch()` (`batch * subdivisions`) must equal the images per step.
+    let mut cfg = cfg.clone();
+    cfg.train.batch = batch;
+    cfg.train.subdivisions = subdiv;
+    let cfg = &cfg;
     let mut net = TrainNet::new(cfg, batch, opts.seed)?;
     let mut seen: u64 = 0;
     if let Some(p) = &opts.resume {
@@ -143,6 +260,7 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
     } else if let Some(p) = &opts.init_weights {
         seen = checkpoint::load_weights(p, &mut net)?;
     }
+    let mut gpu = start_gpu(opts.gpu, &net)?;
     let aug = augment_for(cfg);
     let (net_w, net_h) = (net.net_w(), net.net_h());
     let mut rng = Rng::new(opts.seed);
@@ -163,9 +281,10 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
     // A header, so a run that is working is visibly working: at batch 4 the first iterations take
     // ~20 s each, and silent gaps look like a hang.
     eprintln!(
-        "hip_darknet train — device: CPU (reference trainer; the GPU trainer is not implemented yet)\n  \
+        "hip_darknet train — device: {}\n  \
          {} training images, batch {batch}, {iters} iterations, {} parameters, seed {}\n  \
          augmentation: jitter {:.2} resize {:.2} flip {} hue {:.2} sat {:.2} exp {:.2}",
+        if gpu.is_some() { "AMD GPU (hip-tile)" } else { "CPU (reference trainer)" },
         ds.train.len(),
         net.n_params(),
         opts.seed,
@@ -180,33 +299,33 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
 
     for iteration in 1..=opts.iters {
         let t0 = Instant::now();
-        let picks = next_batch(&mut rng, &mut order, &mut cursor, batch, ds.train.len());
-        let mut input = Vec::with_capacity(batch * 3 * net_h * net_w);
-        let mut truths: Vec<Vec<crate::data::BoxLabel>> = Vec::with_capacity(batch);
-        for &idx in &picks {
-            let sample: &Sample = &ds.train[idx];
-            let img = ds.image(sample)?;
-            let prep = crate::augment::prepare(&mut rng, &img, &sample.labels, net_w as u32, net_h as u32, &aug);
-            if prep.data.len() != 3 * net_h * net_w {
-                return Err(Error::Model(format!(
-                    "{}: prepared image has {} floats, expected {} (cfg channels must be 3)",
-                    sample.image.display(),
-                    prep.data.len(),
-                    3 * net_h * net_w
-                )));
-            }
-            input.extend_from_slice(&prep.data);
-            truths.push(prep.labels);
-        }
-        net.set_input(&input)?;
-        net.zero_grads();
-        net.forward()?;
-        let loss = net.loss_and_deltas(&truths)?;
-        net.backward();
         let lr = learning_rate(&cfg.train, iteration.saturating_sub(1));
-        net.update(lr);
+        // `subdiv` passes of `batch` images each accumulate into the momentum buffers; one update.
+        let mut loss_sum = 0.0f32;
+        for _ in 0..subdiv {
+            let picks = next_batch(&mut rng, &mut order, &mut cursor, batch, ds.train.len());
+            let (input, truths) = prepare_pass(&mut rng, ds, &aug, &picks, net_w, net_h)?;
+            loss_sum += if let Some(g) = gpu.as_mut() {
+                gpu_pass(g, &input, &truths)?
+            } else {
+                net.set_input(&input)?;
+                net.zero_grads();
+                net.forward()?;
+                let loss = net.loss_and_deltas(&truths)?;
+                net.backward();
+                loss
+            };
+        }
+        if let Some(g) = gpu.as_mut() {
+            gpu_update(g, lr)?;
+        } else {
+            net.update(lr);
+        }
+        // The batch loss is a sum over images, so the step's loss is the sum over the passes.
+        let loss = loss_sum;
 
-        seen += batch as u64;
+        seen += (batch * subdiv) as u64;
+        let (prev_loss, prev_ema) = (last_loss, ema);
         if iteration == 1 {
             ema = loss;
             first_loss = loss;
@@ -219,13 +338,17 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
             seen,
             loss,
             avg_loss: ema,
-            loss_per_image: loss / batch as f32,
+            loss_per_image: loss / full as f32,
             learning_rate: lr,
             ms: t0.elapsed().as_secs_f32() * 1e3,
         };
         loss_csv.row(row)?;
 
         let should_save = opts.save_every > 0 && (iteration % opts.save_every == 0 || iteration == opts.iters);
+        let should_eval = opts.eval && opts.eval_every > 0 && iteration % opts.eval_every == 0 && !ds.valid.is_empty();
+        if let Some(g) = gpu.as_ref().filter(|_| should_save || should_eval) {
+            gpu_sync(g, &mut net)?;
+        }
         if should_save {
             std::fs::create_dir_all(&opts.out_dir)
                 .map_err(|e| Error::Io { path: opts.out_dir.display().to_string(), source: e })?;
@@ -234,7 +357,7 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
             checkpoint::save_state(opts.out_dir.join("last.state"), &net, seen)?;
             final_weights = p;
         }
-        if opts.eval && opts.eval_every > 0 && iteration % opts.eval_every == 0 && !ds.valid.is_empty() {
+        if should_eval {
             let model = net.to_model()?;
             let res = crate::metrics::evaluate(&model, classes, &ds.valid, |s| ds.image(s), &DetectOptions::default())?;
             map_50 = res.map_50;
@@ -252,9 +375,14 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
             eval_model = Some(model);
         } else {
             // Every iteration: at ~20 s per step a 50-iteration cadence reads as a hang.
+            let first = iteration == 1;
             eprintln!(
-                "iter {iteration}/{} loss {loss:.4} (avg {ema:.4}) lr {lr:.8} {:.0} ms  [{} images]",
-                opts.iters, row.ms, seen
+                "iter {iteration}/{} loss {} (avg {}) lr {lr:.8} {:.0} ms  [{} images]",
+                opts.iters,
+                trend(loss, prev_loss, first),
+                trend(ema, prev_ema, first),
+                row.ms,
+                seen
             );
         }
     }

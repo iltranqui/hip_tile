@@ -6,14 +6,14 @@ use std::time::Instant;
 
 const USAGE: &str =
     "usage: hip_darknet --cfg C --weights W --names N [--gpu] [--thresh 0.25] [--nms 0.45] [--out PATH] [--bench N] image...
-       hip_darknet train --data D [--cfg C] [--iters N] [--batch N] [--seed S] [--out DIR]
+       hip_darknet train --data D [--cfg C] [--gpu] [--iters N] [--batch N] [--subdivisions N] [--seed S] [--out DIR]
                          [--save-every N] [--eval-every N] [--eval] [--weights W] [--resume STATE]
-       hip_darknet detector train CFG DATA [-map] [-dont_show] [-gpus N] [-iters N] [-batch N] [-out DIR]
+       hip_darknet detector train CFG DATA [-gpu] [-map] [-dont_show] [-gpus N] [-iters N] [-batch N] [-out DIR]
   --gpu       run the forward pass on the AMD GPU (needs the default `gpu` feature)
   --out PATH  write annotated image(s); a directory when several images are given
   --bench N   time N forwards on the first image (CPU and, with --gpu, GPU)
 
-train: the CPU reference trainer. `--cfg` defaults to the dataset's own cfg next to the `.data`
+train: the CPU reference trainer, or the AMD GPU trainer with `--gpu`. `--cfg` defaults to the dataset's own cfg next to the `.data`
 file; `--iters` is optimizer steps, `--batch` overrides the cfg's batch.
 
 `detector train CFG DATA` is the Darknet-shaped form: the two paths may be given in either order
@@ -201,11 +201,15 @@ fn run_train(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 iters_given = true;
             }
             "--batch" => opts.batch = Some(val("--batch")?.parse().map_err(|e| format!("--batch: {e}"))?),
+            "--subdivisions" => {
+                opts.subdivisions = Some(val("--subdivisions")?.parse().map_err(|e| format!("--subdivisions: {e}"))?)
+            }
             "--seed" => opts.seed = val("--seed")?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--out" => opts.out_dir = val("--out")?.into(),
             "--save-every" => opts.save_every = val("--save-every")?.parse().map_err(|e| format!("--save-every: {e}"))?,
             "--eval-every" => opts.eval_every = val("--eval-every")?.parse().map_err(|e| format!("--eval-every: {e}"))?,
             "--eval" => opts.eval = true,
+            "--gpu" => opts.gpu = true,
             "--weights" => opts.init_weights = Some(val("--weights")?.into()),
             "--resume" => opts.resume = Some(val("--resume")?.into()),
             "-h" | "--help" => return Err(USAGE.into()),
@@ -268,9 +272,11 @@ fn run_detector(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = val(a)?;
             }
             "-map" => eval = true,
+            "-gpu" => train_argv.push("--gpu".into()),
             // Our own knobs, in Darknet's `-flag value` spelling.
             "-iters" => train_argv.extend(["--iters".into(), val("-iters")?]),
             "-batch" => train_argv.extend(["--batch".into(), val("-batch")?]),
+            "-subdivisions" => train_argv.extend(["--subdivisions".into(), val("-subdivisions")?]),
             "-seed" => train_argv.extend(["--seed".into(), val("-seed")?]),
             "-out" => train_argv.extend(["--out".into(), val("-out")?]),
             "-save_every" => train_argv.extend(["--save-every".into(), val("-save_every")?]),

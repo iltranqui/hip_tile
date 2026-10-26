@@ -21,6 +21,7 @@ The code graph and the two workflows that change it. Read after `CLAUDE.md` when
 | `kernels` | all GPU kernels (built for the device and, for launchers, the host) |
 | `apps/runner` | kernel tests and benchmarks |
 | `crates/hip_darknet` | Darknet YOLO port: loader, CPU reference, decode, GPU executor, CLI |
+| `xtask` | `cargo xtask <task>`: project automation (`train_hip_legogears`) |
 | `docs` | images for the README |
 
 ## Dependency graph

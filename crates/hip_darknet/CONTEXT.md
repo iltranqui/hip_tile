@@ -12,7 +12,7 @@ One job: load a Darknet model and detect objects, on the CPU (reference) or the 
 ## Files
 
 - `cfg.rs`, `weights.rs` (BN fold), `model.rs` (layers, shapes), `reference.rs` (CPU forward, every layer), `yolo.rs` (decode, DIoU-NMS), `image.rs`, `error.rs`, `lib.rs` (`detect_cpu`, `detect_gpu`).
-- Training (CPU reference today; `ROADMAP.md`): `data.rs` (`.data`, image lists, labels), `augment.rs` (jitter/flip/colour, seeded), `metrics.rs` (mAP@0.5 and 0.5:0.95), `train/` (`deltas.rs` box math + `[yolo]` deltas + cost, `net.rs` unfolded-BN forward/backward/SGD, `checkpoint.rs` Darknet `.weights` writer + resume state, `driver.rs` the loop and csvs).
+- Training (CPU reference today; `ROADMAP.md`): `data.rs` (`.data`, image lists, labels), `augment.rs` (jitter/flip/colour, seeded), `metrics.rs` (mAP@0.5 and 0.5:0.95), `train/` (`gpu.rs` `GpuTrainNet`: the GPU trainer, created from a `TrainNet` and copied back at checkpoints; `--gpu` / `-gpu` selects it; `deltas.rs` box math + `[yolo]` deltas + cost, `net.rs` unfolded-BN forward/backward/SGD, `checkpoint.rs` Darknet `.weights` writer + resume state, `driver.rs` the loop and csvs).
 - Feature `gpu` (default): `gpu.rs` (`GpuModel`), `draw.rs`, `build.rs` (kernels ELF).
 - `main.rs`: CLI (`--gpu`, `--out`, `--bench`, `--thresh`, `--nms`), the `train` subcommand, and the Darknet-shaped `detector train CFG DATA [-map] [-dont_show] [-gpus N]` entry point (paths accepted in either order, checkpoints next to the `.data` file unless `-out`).
 - `tests/detect.rs` (ground truth), `tests/gpu.rs` (per-layer and detection parity), `tests/gradients.rs` (numeric gradient checks), `tests/learning.rs` (a toy net must learn).

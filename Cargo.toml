@@ -9,6 +9,7 @@ members = [
     "crates/hip_darknet",
     "kernels",
     "apps/runner",
+    "xtask",
 ]
 
 [workspace.package]
