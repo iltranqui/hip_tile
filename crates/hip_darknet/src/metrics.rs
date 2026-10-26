@@ -1,8 +1,8 @@
 //! mAP evaluation on a labelled list, through the verified inference path.
 //!
 //! The detector output comes from [`crate::yolo`] (decode + NMS) after folding the trained BN
-//! statistics into a [`Model`], so evaluation uses exactly the same code as `hip_darknet --gpu`
-//! inference. Matching is per class, greedy by score, VOC-style average precision.
+//! statistics into a [`crate::model::Model`], so evaluation uses exactly the same code as
+//! `hip_darknet --gpu` inference (the caller passes the CPU or GPU detector). Matching is per class, greedy by score, VOC-style average precision.
 //!
 //! Darknet's `map.csv` logs `iou = 0.5`; a 0.5:0.95 sweep is computed next to it because the
 //! reference file has no column for it (`ROADMAP.md`).
@@ -10,8 +10,7 @@
 use crate::data::{BoxLabel, Sample};
 use crate::error::Result;
 use crate::image::Image;
-use crate::model::Model;
-use crate::yolo::{DetectOptions, Detection};
+use crate::yolo::Detection;
 
 /// Result of one evaluation pass.
 #[derive(Debug, Clone, Default)]
@@ -25,6 +24,66 @@ pub struct MapResult {
     pub n_images: usize,
     pub n_gt: usize,
     pub n_det: usize,
+    /// Per-class detection counts at [`REPORT_CONFIDENCE`] and IoU 0.5.
+    pub counts: Vec<ClassCounts>,
+}
+
+/// Confidence above which a detection counts for the TP / FP / FN table (Darknet's `thresh_calc_avg_iou`).
+pub const REPORT_CONFIDENCE: f32 = 0.25;
+
+/// True / false positives and false negatives of one class. A detection-only task has no
+/// meaningful true-negative count (every empty box position would be one), so there is none.
+#[derive(Debug, Clone, Default)]
+pub struct ClassCounts {
+    pub tp: usize,
+    pub fp: usize,
+    pub fn_: usize,
+    pub gt: usize,
+    /// Mean IoU of the matched detections (0 when there are none).
+    pub avg_iou: f32,
+}
+
+impl ClassCounts {
+    pub fn precision(&self) -> f32 {
+        if self.tp + self.fp == 0 { 0.0 } else { self.tp as f32 / (self.tp + self.fp) as f32 }
+    }
+
+    pub fn recall(&self) -> f32 {
+        if self.gt == 0 { 0.0 } else { self.tp as f32 / self.gt as f32 }
+    }
+
+    pub fn f1(&self) -> f32 {
+        let (p, r) = (self.precision(), self.recall());
+        if p + r == 0.0 { 0.0 } else { 2.0 * p * r / (p + r) }
+    }
+}
+
+/// Greedy match of one class's detections (sorted by score) at IoU 0.5, above [`REPORT_CONFIDENCE`].
+fn class_counts(dets: &[&Det], gts: &[&(usize, BoxLabel)]) -> ClassCounts {
+    let mut matched = vec![false; gts.len()];
+    let (mut tp, mut fp, mut iou_sum) = (0usize, 0usize, 0.0f32);
+    for d in dets.iter().filter(|d| d.score >= REPORT_CONFIDENCE) {
+        let mut best = 0.5f32;
+        let mut best_i = usize::MAX;
+        for (i, (image, gt)) in gts.iter().enumerate() {
+            if *image != d.image || matched[i] {
+                continue;
+            }
+            let v = iou(d.bbox, *gt);
+            if v >= best {
+                best = v;
+                best_i = i;
+            }
+        }
+        if best_i == usize::MAX {
+            fp += 1;
+        } else {
+            matched[best_i] = true;
+            tp += 1;
+            iou_sum += best;
+        }
+    }
+    ClassCounts { tp, fp, fn_: gts.len() - tp, gt: gts.len(), avg_iou: if tp == 0 { 0.0 } else { iou_sum / tp as f32 } }
 }
 
 fn iou(a: BoxLabel, b: BoxLabel) -> f32 {
@@ -108,17 +167,16 @@ fn average_precision(dets: &[&Det], gts: &[&(usize, BoxLabel)], thr: f32) -> f32
 
 /// Evaluate `model` on `samples` (labels are normalized to their own image, as are detections).
 pub fn evaluate(
-    model: &Model,
     classes: usize,
     samples: &[Sample],
     load: impl Fn(&Sample) -> Result<Image>,
-    opts: &DetectOptions,
+    detect: impl Fn(&Image) -> Result<Vec<Detection>>,
 ) -> Result<MapResult> {
     let mut dets: Vec<Det> = vec![];
     let mut gt: Vec<(usize, BoxLabel)> = vec![];
     for (image_idx, sample) in samples.iter().enumerate() {
         let img = load(sample)?;
-        let found = crate::detect_cpu(model, &img, opts)?;
+        let found = detect(&img)?;
         for d in &found {
             let mut det = Det::from(d);
             det.image = image_idx;
@@ -164,7 +222,15 @@ pub fn evaluate(
         sweep += map_at(0.5 + 0.05 * k as f32);
         n_thr += 1;
     }
+    let counts = (0..classes)
+        .map(|c| {
+            let cd: Vec<&Det> = dets.iter().filter(|d| d.class == c).collect();
+            let cg: Vec<&(usize, BoxLabel)> = gt.iter().filter(|(_, l)| l.class == c).collect();
+            class_counts(&cd, &cg)
+        })
+        .collect();
     Ok(MapResult {
+        counts,
         map_50,
         map_50_95: sweep / n_thr as f32,
         per_class,

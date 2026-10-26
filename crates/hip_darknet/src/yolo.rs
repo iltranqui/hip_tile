@@ -43,11 +43,13 @@ pub struct DetectOptions {
     pub thresh: f32,
     /// Darknet's `detector test` default is 0.45.
     pub nms_thresh: f32,
+    /// Overrides the `[yolo]` heads' `nms_kind` when `Some`.
+    pub nms_kind: Option<NmsKind>,
 }
 
 impl Default for DetectOptions {
     fn default() -> Self {
-        DetectOptions { thresh: 0.25, nms_thresh: 0.45 }
+        DetectOptions { thresh: 0.25, nms_thresh: 0.45, nms_kind: None }
     }
 }
 
@@ -144,6 +146,23 @@ pub fn box_diou(a: &BBox, b: &BBox, beta: f32) -> f32 {
     iou - (d / c).powf(beta)
 }
 
+/// Complete IoU (`box_ciou`, `box.cpp:1088`): IoU minus the squared centre distance over the
+/// enclosing diagonal, minus the aspect-ratio term.
+pub fn box_ciou(a: &BBox, b: &BBox) -> f32 {
+    let w = (a.x + a.w / 2.0).max(b.x + b.w / 2.0) - (a.x - a.w / 2.0).min(b.x - b.w / 2.0);
+    let h = (a.y + a.h / 2.0).max(b.y + b.h / 2.0) - (a.y - a.h / 2.0).min(b.y - b.h / 2.0);
+    let c = w * w + h * h;
+    let iou = box_iou(a, b);
+    if c == 0.0 {
+        return iou;
+    }
+    let d = ((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)) / c;
+    let pi2 = std::f32::consts::PI * std::f32::consts::PI;
+    let ar_loss = 4.0 / pi2 * ((b.w / b.h).atan() - (a.w / a.h).atan()).powi(2);
+    let alpha = ar_loss / (1.0 - iou + ar_loss + 0.000001);
+    iou - (d + alpha * ar_loss)
+}
+
 /// Per-class greedy NMS in place (`do_nms_sort` / `diounms_sort`): sort by class prob, then zero the
 /// probability of every later box whose overlap with a kept box exceeds `thresh`.
 pub fn nms(dets: &mut Vec<RawDetection>, classes: usize, thresh: f32, kind: NmsKind, beta: f32) {
@@ -160,6 +179,7 @@ pub fn nms(dets: &mut Vec<RawDetection>, classes: usize, thresh: f32, kind: NmsK
                     NmsKind::Default => box_iou(&a, &d.bbox),
                     NmsKind::Greedy => box_diou(&a, &d.bbox, 0.6),
                     NmsKind::Diou => box_diou(&a, &d.bbox, beta),
+                    NmsKind::Ciou => box_ciou(&a, &d.bbox),
                 };
                 if ov > thresh {
                     d.probs[k] = 0.0;
@@ -183,7 +203,7 @@ pub fn detect_heads(model: &Model, heads: &[&[f32]], opts: &DetectOptions) -> Ve
         last = Some(y);
     }
     let Some(y) = last else { return vec![] };
-    nms(&mut raw, y.classes, opts.nms_thresh, y.nms_kind, y.beta_nms);
+    nms(&mut raw, y.classes, opts.nms_thresh, opts.nms_kind.unwrap_or(y.nms_kind), y.beta_nms);
     let mut out = vec![];
     for d in &raw {
         for (class, &prob) in d.probs.iter().enumerate() {

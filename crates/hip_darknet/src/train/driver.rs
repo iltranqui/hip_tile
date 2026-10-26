@@ -28,6 +28,56 @@ fn trend(value: f32, prev: f32, first: bool) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+/// Per-class TP / FP / FN table (confidence 0.25, IoU 0.5) with a total row, as lightnet prints it.
+/// There is no TN column: a detector has no countable true negatives.
+fn counts_table(counts: &[crate::metrics::ClassCounts], names: &[String]) -> String {
+    use crate::metrics::{ClassCounts, REPORT_CONFIDENCE};
+    let (tp, fp, fn_) = (tint("TP", 32), tint("FP", 31), tint("FN", 33));
+    let mut out = format!(
+        "  {tp}={}, {fp}={}, {fn_}={}, GT=ground truth (conf >= {REPORT_CONFIDENCE}, IoU 0.5)\n  \
+         Id Name                     {tp}     {fp}     {fn_}     GT     F1 AvgIoU\n",
+        tint("true positive", 32),
+        tint("false positive", 31),
+        tint("false negative", 33),
+    );
+    let mut total = ClassCounts::default();
+    let mut iou_sum = 0.0f32;
+    for (id, c) in counts.iter().enumerate() {
+        total.tp += c.tp;
+        total.fp += c.fp;
+        total.fn_ += c.fn_;
+        total.gt += c.gt;
+        iou_sum += c.avg_iou * c.tp as f32;
+        if c.gt == 0 && c.tp + c.fp == 0 {
+            continue;
+        }
+        let name = names.get(id).map_or("", String::as_str);
+        out += &format!(
+            "  {id:>2} {name:<20.20} {} {} {} {:>6} {:>5.1}% {:>5.1}%\n",
+            paint(c.tp, 32), paint(c.fp, 31), paint(c.fn_, 33), c.gt, 100.0 * c.f1(), 100.0 * c.avg_iou
+        );
+    }
+    total.avg_iou = if total.tp == 0 { 0.0 } else { iou_sum / total.tp as f32 };
+    out += &format!(
+        "     {:<20} {} {} {} {:>6} {:>5.1}% {:>5.1}%\n",
+        "total", paint(total.tp, 32), paint(total.fp, 31), paint(total.fn_, 33), total.gt, 100.0 * total.f1(),
+        100.0 * total.avg_iou
+    );
+    out
+}
+
+/// A count right-aligned to 6 columns, in ANSI colour `code` (green TP, red FP, yellow FN) when
+/// stderr is a terminal and the count is not zero.
+fn paint(n: usize, code: u8) -> String {
+    let text = format!("{n:>6}");
+    if n == 0 { text } else { tint(&text, code) }
+}
+
+/// `text` in ANSI colour `code` when stderr is a terminal.
+fn tint(text: &str, code: u8) -> String {
+    if std::io::stderr().is_terminal() { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_string() }
+}
+
 /// What a run should do.
 #[derive(Debug, Clone)]
 pub struct TrainOptions {
@@ -59,7 +109,7 @@ impl Default for TrainOptions {
             subdivisions: None,
             seed: 1,
             save_every: 100,
-            eval_every: 1000,
+            eval_every: 100,
             out_dir: PathBuf::from("."),
             init_weights: None,
             resume: None,
@@ -198,6 +248,44 @@ fn gpu_update(_: &mut GpuHandle, _: f32) -> Result<()> {
     unreachable!("start_gpu refuses without the gpu feature")
 }
 
+/// Detector settings for mAP: decode down to confidence 0.005 so AP sees the whole
+/// precision-recall curve (lightnet's `map_thresh`; the TP/FP/FN table still counts only
+/// `REPORT_CONFIDENCE` and up), and suppress duplicates with CIoU NMS.
+fn map_detect_options() -> DetectOptions {
+    DetectOptions { thresh: 0.005, nms_kind: Some(crate::cfg::NmsKind::Ciou), ..DetectOptions::default() }
+}
+
+/// mAP of `model` on `samples`, with the forward on the GPU when `gpu` (the inference model is
+/// built per call and freed after, so it does not stay resident next to the training buffers).
+#[cfg(feature = "gpu")]
+fn evaluate_map(
+    model: &crate::model::Model,
+    gpu: bool,
+    classes: usize,
+    samples: &[Sample],
+    load: impl Fn(&Sample) -> Result<crate::image::Image>,
+) -> Result<crate::metrics::MapResult> {
+    let opts = map_detect_options();
+    if gpu {
+        let g = crate::gpu::GpuModel::new(model)?;
+        crate::metrics::evaluate(classes, samples, load, |img| crate::detect_gpu(model, &g, img, &opts))
+    } else {
+        crate::metrics::evaluate(classes, samples, load, |img| crate::detect_cpu(model, img, &opts))
+    }
+}
+
+#[cfg(not(feature = "gpu"))]
+fn evaluate_map(
+    model: &crate::model::Model,
+    _gpu: bool,
+    classes: usize,
+    samples: &[Sample],
+    load: impl Fn(&Sample) -> Result<crate::image::Image>,
+) -> Result<crate::metrics::MapResult> {
+    let opts = map_detect_options();
+    crate::metrics::evaluate(classes, samples, load, |img| crate::detect_cpu(model, img, &opts))
+}
+
 /// Load and augment the images at `picks` into one NCHW input and their ground truths.
 fn prepare_pass(
     rng: &mut Rng,
@@ -297,7 +385,11 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
         iters = opts.iters,
     );
 
-    for iteration in 1..=opts.iters {
+    // Darknet's iteration count is `seen / batch`, so weights or a state that already saw images
+    // continue the learning-rate schedule (and the burn-in gate) instead of restarting it.
+    let base = (seen / full as u64) as usize;
+    for step in 1..=opts.iters {
+        let iteration = base + step;
         let t0 = Instant::now();
         let lr = learning_rate(&cfg.train, iteration.saturating_sub(1));
         // `subdiv` passes of `batch` images each accumulate into the momentum buffers; one update.
@@ -326,7 +418,7 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
 
         seen += (batch * subdiv) as u64;
         let (prev_loss, prev_ema) = (last_loss, ema);
-        if iteration == 1 {
+        if step == 1 {
             ema = loss;
             first_loss = loss;
         } else {
@@ -344,8 +436,13 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
         };
         loss_csv.row(row)?;
 
-        let should_save = opts.save_every > 0 && (iteration % opts.save_every == 0 || iteration == opts.iters);
-        let should_eval = opts.eval && opts.eval_every > 0 && iteration % opts.eval_every == 0 && !ds.valid.is_empty();
+        let should_save = opts.save_every > 0 && (iteration.is_multiple_of(opts.save_every) || step == opts.iters);
+        // No mAP during burn-in (the rate is still ramping up): evaluate from `burn_in` on.
+        let should_eval = opts.eval
+            && opts.eval_every > 0
+            && iteration >= cfg.train.burn_in
+            && iteration.is_multiple_of(opts.eval_every)
+            && !ds.valid.is_empty();
         if let Some(g) = gpu.as_ref().filter(|_| should_save || should_eval) {
             gpu_sync(g, &mut net)?;
         }
@@ -355,11 +452,18 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
             let p = opts.out_dir.join(format!("iter_{iteration:06}.weights"));
             checkpoint::save_weights(&p, &net, seen)?;
             checkpoint::save_state(opts.out_dir.join("last.state"), &net, seen)?;
+            eprintln!("saved {} and last.state", p.display());
             final_weights = p;
         }
         if should_eval {
             let model = net.to_model()?;
-            let res = crate::metrics::evaluate(&model, classes, &ds.valid, |s| ds.image(s), &DetectOptions::default())?;
+            let (done, total, t_eval) = (std::cell::Cell::new(0usize), ds.valid.len(), Instant::now());
+            let res = evaluate_map(&model, gpu.is_some(), classes, &ds.valid, |s| {
+                done.set(done.get() + 1);
+                eprint!("\r  mAP eval {}/{total} images ({:.0}s)", done.get(), t_eval.elapsed().as_secs_f32());
+                ds.image(s)
+            })?;
+            eprintln!();
             map_50 = res.map_50;
             map_50_95 = res.map_50_95;
             best_map = best_map.max(res.map_50);
@@ -372,13 +476,14 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
                 "iter {iteration} loss {loss:.4} (avg {ema:.4}) lr {lr:.8} mAP@0.5 {:.4} mAP@0.5:0.95 {:.4}",
                 res.map_50, res.map_50_95
             );
+            eprint!("{}", counts_table(&res.counts, &ds.names));
             eval_model = Some(model);
         } else {
             // Every iteration: at ~20 s per step a 50-iteration cadence reads as a hang.
-            let first = iteration == 1;
+            let first = step == 1;
             eprintln!(
                 "iter {iteration}/{} loss {} (avg {}) lr {lr:.8} {:.0} ms  [{} images]",
-                opts.iters,
+                base + opts.iters,
                 trend(loss, prev_loss, first),
                 trend(ema, prev_ema, first),
                 row.ms,

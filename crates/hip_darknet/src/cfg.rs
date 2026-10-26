@@ -18,6 +18,9 @@ pub enum NmsKind {
     Greedy,
     /// DIoU with `beta_nms` as exponent (`diounms`).
     Diou,
+    /// CIoU (DIoU plus the aspect-ratio term). Not a Darknet cfg value: only set through
+    /// `DetectOptions::nms_kind`.
+    Ciou,
 }
 
 /// `iou_loss` of a `[yolo]` head. Defaults to `Mse` like Darknet (`darknet_cfg.cpp:2452`).

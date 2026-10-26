@@ -304,9 +304,9 @@ fn run_detector(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     if eval {
         train_argv.push("--eval".into());
-        // Darknet validates every 1000 iterations when `-map` is on.
+        // mAP every 100 iterations once burn-in is over (`-map_every` overrides).
         if !train_argv.iter().any(|a| a == "--eval-every") {
-            train_argv.extend(["--eval-every".into(), "1000".into()]);
+            train_argv.extend(["--eval-every".into(), "100".into()]);
         }
     }
     // Darknet writes checkpoints to the `.data` file's `backup` directory; ours defaults to the
