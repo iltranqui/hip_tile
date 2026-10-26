@@ -112,3 +112,31 @@ fn concat_batched_matches_per_image() {
     assert_eq!(got.copy_to_vec().unwrap(), want);
     let _ = launch_concat; // single-image path is covered in yolo_ops.rs
 }
+
+/// `dst += src` per image for a group slice of a larger gradient (the route-backward shape).
+#[test]
+fn route_bwd_batched_group_slice() {
+    use kernels::backward::batched::launch_route_bwd_batched;
+    let md = module();
+    let (c_total, c, hw) = (128usize, 64usize, 20 * 28);
+    let src = signed(BATCH * c * hw, 8);
+    let base = signed(BATCH * c_total * hw, 9);
+    let dsrc = DeviceBuffer::from_slice(&src).unwrap();
+    let mut ddst = DeviceBuffer::from_slice(&base).unwrap();
+    let dptr = ddst.as_mut_ptr();
+    launch_route_bwd_batched(
+        &md, None, BATCH as u32,
+        dsrc.tensor(c as u32, hw as u32), c * hw,
+        TensorMut::new(unsafe { dptr.add(c * hw) }, c as u32, hw as u32, hw as u32), c_total * hw,
+    )
+    .unwrap();
+    let mut want = base.clone();
+    for b in 0..BATCH {
+        for ch in 0..c {
+            for j in 0..hw {
+                want[(b * c_total + c + ch) * hw + j] += src[(b * c + ch) * hw + j];
+            }
+        }
+    }
+    assert_eq!(ddst.copy_to_vec().unwrap(), want);
+}

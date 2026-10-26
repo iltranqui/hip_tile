@@ -14,12 +14,12 @@ use super::maxpool::{PoolParams, launch_maxpool};
 use super::upsample::launch_upsample;
 
 /// Image `b` of a batch laid out back to back behind `t`.
-fn image<T>(t: Tensor<T>, b: u32) -> Tensor<T> {
+pub(crate) fn image<T>(t: Tensor<T>, b: u32) -> Tensor<T> {
     let off = b as usize * t.rows() as usize * t.ld() as usize;
     Tensor::new(unsafe { t.ptr().add(off) }, t.rows(), t.cols(), t.ld())
 }
 
-fn image_mut<T>(t: TensorMut<T>, b: u32) -> TensorMut<T> {
+pub(crate) fn image_mut<T>(t: TensorMut<T>, b: u32) -> TensorMut<T> {
     let off = b as usize * t.rows() as usize * t.ld() as usize;
     TensorMut::new(unsafe { t.ptr().add(off) }, t.rows(), t.cols(), t.ld())
 }

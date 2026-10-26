@@ -12,9 +12,16 @@
 
 use hip_rt::{Device, DeviceBuffer, Module, Stream};
 use hip_tile::{Tensor, TensorMut};
+use kernels::backward::act_bwd::launch_leaky_bwd;
+use kernels::backward::batched::{launch_maxpool_bwd_batched, launch_route_bwd_batched, launch_upsample_bwd_batched};
+use kernels::backward::bias_bwd::{BiasBwdParams, launch_bias_bwd};
+use kernels::backward::bn_bwd::{BnBwdParams, launch_bn_bwd};
 use kernels::backward::bn_fwd::{BnFwdParams, launch_bn_fwd};
+use kernels::backward::conv_bwd_dw::launch_conv_bwd_dw;
+use kernels::backward::conv_bwd_dx::launch_conv_bwd_dx;
+use kernels::backward::ConvBwdParams;
 use kernels::backward::bn_stats::{BnStatsParams, launch_bn_stats};
-use kernels::backward::util::{launch_acc, launch_running_update, launch_zero};
+use kernels::backward::util::{SgdParams, launch_acc, launch_running_update, launch_sgd_update, launch_zero};
 use kernels::backward::yolo_act::{YoloActParams, launch_yolo_act};
 use kernels::backward::yolo_delta::{
     IOU_LOSS_CIOU, IOU_LOSS_DIOU, IOU_LOSS_GIOU, IOU_LOSS_IOU, MAX_MASK, YoloDeltaParams, launch_yolo_delta,
@@ -23,7 +30,7 @@ use kernels::yolo::batched::{launch_concat_batched, launch_conv_batched, launch_
 use kernels::yolo::conv::ConvParams;
 use kernels::yolo::maxpool::PoolParams;
 
-use crate::cfg::{Activation, IouLoss};
+use crate::cfg::{Activation, IouLoss, TrainCfg};
 use crate::data::BoxLabel;
 use crate::error::{Error, Result};
 use crate::gpu::{KERNELS_ELF, hip, upload};
@@ -49,6 +56,10 @@ struct GpuConv {
     sum: Option<DeviceBuffer<f32>>,
     /// Darknet's `x_norm`, kept for the backward pass (BN layers only).
     xhat: Option<DeviceBuffer<f32>>,
+    /// Gradient accumulators that double as the momentum buffers (Darknet's `*_updates`).
+    weight_updates: DeviceBuffer<f32>,
+    bias_updates: DeviceBuffer<f32>,
+    scale_updates: DeviceBuffer<f32>,
 }
 
 /// One `[yolo]` head's device state for the loss.
@@ -73,6 +84,7 @@ pub struct GpuTrainNet {
     /// Per layer activation; a `[yolo]` layer owns its (activated) output.
     outs: Vec<DeviceBuffer<f32>>,
     convs: Vec<Option<GpuConv>>,
+    train: TrainCfg,
     /// Per layer gradient w.r.t. `outs[i]`.
     grads: Vec<DeviceBuffer<f32>>,
     /// Aligned with `model.layers`; `Some` only for `[yolo]` layers.
@@ -134,12 +146,15 @@ impl GpuTrainNet {
                         rolling_var: hip(DeviceBuffer::from_slice(&st.rolling_var))?,
                         sum: if bn { Some(hip(DeviceBuffer::zeroed(n))?) } else { None },
                         xhat: if bn { Some(hip(DeviceBuffer::zeroed(n))?) } else { None },
+                        weight_updates: hip(DeviceBuffer::from_slice(&st.weight_updates))?,
+                        bias_updates: hip(DeviceBuffer::from_slice(&st.bias_updates))?,
+                        scale_updates: hip(DeviceBuffer::from_slice(&st.scale_updates))?,
                     }));
                 }
                 _ => convs.push(None),
             }
         }
-        Ok(GpuTrainNet { model, batch, _device: device, module, stream, input, outs, convs, grads, heads, loss: 0.0 })
+        Ok(GpuTrainNet { model, batch, _device: device, module, stream, input, outs, convs, train: net.cfg.train.clone(), grads, heads, loss: 0.0 })
     }
 
     pub fn batch(&self) -> usize {
@@ -344,6 +359,171 @@ impl GpuTrainNet {
         }
         self.loss = total / heads.len() as f32;
         Ok(self.loss)
+    }
+
+    /// Overwrite the device forward state (input, every activation, the BN sums, `x_norm` and
+    /// batch statistics) with `net`'s after its [`TrainNet::forward`]. The backward pass then runs
+    /// on exactly the CPU's forward values, which isolates it in parity tests: two f32 forwards
+    /// differ by rounding, and a rounding-sized difference at a leaky-ReLU kink flips a gradient
+    /// factor between 1 and 0.1.
+    pub fn load_activations(&mut self, net: &TrainNet) -> Result<()> {
+        hip(upload(&self.input, &net.input))?;
+        for (i, out) in self.outs.iter().enumerate() {
+            hip(upload(out, &net.outs[i]))?;
+        }
+        for (i, g) in self.convs.iter().enumerate() {
+            let (Some(g), Some(st)) = (g, &net.convs[i]) else { continue };
+            hip(upload(&g.mean, &st.mean))?;
+            hip(upload(&g.var, &st.var))?;
+            if let (Some(sum), Some(xhat)) = (&g.sum, &g.xhat) {
+                hip(upload(sum, net.conv_sum[i].as_deref().expect("conv sum")))?;
+                hip(upload(xhat, net.conv_norm[i].as_deref().expect("x_norm")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Backward through every layer, accumulating parameter updates (`*_updates`) and the
+    /// gradients of every layer's output. Call after [`GpuTrainNet::loss_and_deltas`]; the `[yolo]`
+    /// layers are skipped because their delta already sits in the previous layer's gradient. The
+    /// network input's gradient is not computed.
+    pub fn backward(&mut self) -> Result<()> {
+        self.backward_until(0)
+    }
+
+    /// [`GpuTrainNet::backward`] stopping after layer `first` (layers `first..` are processed),
+    /// to inspect the gradients mid-network.
+    pub fn backward_until(&mut self, first: usize) -> Result<()> {
+        let (md, st, batch) = (&self.module, Some(&self.stream), self.batch as u32);
+        for i in (first..self.model.layers.len()).rev() {
+            let l = &self.model.layers[i];
+            let (ins, outs) = (l.in_shape, l.out_shape);
+            let (ohw, ihw) = ((outs.h * outs.w) as u32, (ins.h * ins.w) as u32);
+            let prev: *const f32 = if i == 0 { self.input.as_ptr() } else { self.outs[i - 1].as_ptr() };
+            let delta = self.grads[i].as_ptr().cast_mut();
+            match &l.kind {
+                LayerKind::Yolo(_) => {}
+                LayerKind::Conv(c) => {
+                    let g = self.convs[i].as_ref().expect("conv state");
+                    let (ch, kdim) = (outs.c as u32, c.k() as u32);
+                    let flat = batch * ch * ohw;
+                    if c.cfg.activation == Activation::Leaky {
+                        hip(launch_leaky_bwd(md, st, TensorMut::vector(delta, flat), Tensor::vector(self.outs[i].as_ptr(), flat)))?;
+                    }
+                    // The channel view of the whole batch: `[C x spatial]` rows, image stride `C*spatial`.
+                    let dview = TensorMut::new(delta, ch, ohw, ch * ohw);
+                    if c.cfg.batch_normalize {
+                        let (sum, xhat) = (g.sum.as_ref().expect("bn sum"), g.xhat.as_ref().expect("bn xhat"));
+                        let vec_c = |b: &DeviceBuffer<f32>| Tensor::vector(b.as_ptr(), ch);
+                        hip(launch_bn_bwd(
+                            md, st,
+                            Tensor::new(sum.as_ptr(), ch, ohw, ch * ohw),
+                            Tensor::new(xhat.as_ptr(), ch, ohw, ch * ohw),
+                            dview, vec_c(&g.mean), vec_c(&g.var), vec_c(&g.scales),
+                            TensorMut::vector(g.scale_updates.as_ptr().cast_mut(), ch),
+                            &BnBwdParams { batch, spatial: ohw },
+                        ))?;
+                    } else {
+                        hip(launch_bias_bwd(
+                            md, st,
+                            Tensor::new(delta, ch, ohw, ch * ohw),
+                            TensorMut::vector(g.bias_updates.as_ptr().cast_mut(), ch),
+                            &BiasBwdParams { batch, spatial: ohw },
+                        ))?;
+                    }
+                    let conv = ConvParams::with_cout(
+                        ins.c as u32, ch, ins.h as u32, ins.w as u32, c.cfg.size as u32, c.cfg.stride as u32, c.cfg.padding as u32,
+                        ConvParams::LINEAR,
+                    );
+                    let p = ConvBwdParams::new(conv, batch);
+                    let d_img = Tensor::new(delta, ch, ohw, ohw);
+                    hip(launch_conv_bwd_dw(
+                        md, st, d_img, Tensor::new(prev, ins.c as u32, ihw, ihw),
+                        TensorMut::new(g.weight_updates.as_ptr().cast_mut(), ch, kdim, kdim), &p,
+                    ))?;
+                    if i > 0 {
+                        hip(launch_conv_bwd_dx(
+                            md, st, d_img, Tensor::new(g.weights.as_ptr(), ch, kdim, kdim),
+                            TensorMut::new(self.grads[i - 1].as_ptr().cast_mut(), ins.c as u32, ihw, ihw), &p,
+                        ))?;
+                    }
+                }
+                LayerKind::Maxpool(m) => {
+                    if i > 0 {
+                        let p = PoolParams::new(ins.h as u32, ins.w as u32, m.size as u32, m.stride as u32, Some(m.padding as u32));
+                        hip(launch_maxpool_bwd_batched(
+                            md, st, batch,
+                            Tensor::new(prev, ins.c as u32, ihw, ihw),
+                            Tensor::new(delta, outs.c as u32, ohw, ohw),
+                            TensorMut::new(self.grads[i - 1].as_ptr().cast_mut(), ins.c as u32, ihw, ihw),
+                            &p,
+                        ))?;
+                    }
+                }
+                LayerKind::Upsample { stride } => {
+                    if i > 0 {
+                        hip(launch_upsample_bwd_batched(
+                            md, st, batch,
+                            Tensor::new(delta, outs.c as u32, ohw, ohw),
+                            TensorMut::new(self.grads[i - 1].as_ptr().cast_mut(), ins.c as u32, ihw, ihw),
+                            ins.w as u32, *stride as u32,
+                        ))?;
+                    }
+                }
+                LayerKind::Route { sources, groups, group_id } => {
+                    let mut ch0 = 0usize;
+                    for &s in sources {
+                        let src_c = self.model.layers[s].out_shape.c;
+                        let c = src_c / groups;
+                        let src = unsafe { delta.add(ch0 * ohw as usize) };
+                        let dst = unsafe { self.grads[s].as_ptr().cast_mut().add(group_id * c * ohw as usize) };
+                        hip(launch_route_bwd_batched(
+                            md, st, batch,
+                            Tensor::new(src, c as u32, ohw, ohw), outs.c * ohw as usize,
+                            TensorMut::new(dst, c as u32, ohw, ohw), src_c * ohw as usize,
+                        ))?;
+                        ch0 += c;
+                    }
+                }
+            }
+        }
+        hip(self.stream.synchronize())
+    }
+
+    /// Darknet's SGD step on every conv layer (`convolutional_layer.cpp:2983-3005`), on the device.
+    pub fn update(&mut self, lr: f32) -> Result<()> {
+        let t = &self.train;
+        let batch = t.effective_batch() as f32;
+        let (md, st) = (&self.module, Some(&self.stream));
+        let with_decay = SgdParams { learning_rate: lr, momentum: t.momentum, decay: t.decay, batch };
+        // Bias and BN scales are never decayed.
+        let no_decay = SgdParams { decay: 0.0, ..with_decay };
+        for g in self.convs.iter().flatten() {
+            let vec = |b: &DeviceBuffer<f32>| TensorMut::vector(b.as_ptr().cast_mut(), b.len() as u32);
+            hip(launch_sgd_update(md, st, vec(&g.weights), vec(&g.weight_updates), &with_decay))?;
+            hip(launch_sgd_update(md, st, vec(&g.bias), vec(&g.bias_updates), &no_decay))?;
+            hip(launch_sgd_update(md, st, vec(&g.scales), vec(&g.scale_updates), &no_decay))?;
+        }
+        hip(self.stream.synchronize())
+    }
+
+    /// Copy the device parameters, momentum buffers and batch-norm state back into `net`
+    /// (parity checks, and later checkpoints).
+    pub fn download_into(&self, net: &mut TrainNet) -> Result<()> {
+        for (g, st) in self.convs.iter().zip(net.convs.iter_mut()) {
+            let (Some(g), Some(st)) = (g, st) else { continue };
+            st.weights = hip(g.weights.copy_to_vec())?;
+            st.bias = hip(g.bias.copy_to_vec())?;
+            st.scales = hip(g.scales.copy_to_vec())?;
+            st.mean = hip(g.mean.copy_to_vec())?;
+            st.var = hip(g.var.copy_to_vec())?;
+            st.rolling_mean = hip(g.rolling_mean.copy_to_vec())?;
+            st.rolling_var = hip(g.rolling_var.copy_to_vec())?;
+            st.weight_updates = hip(g.weight_updates.copy_to_vec())?;
+            st.bias_updates = hip(g.bias_updates.copy_to_vec())?;
+            st.scale_updates = hip(g.scale_updates.copy_to_vec())?;
+        }
+        Ok(())
     }
 
     /// Download layer `i`'s gradient w.r.t. its output (`[batch x C x H x W]`), for parity checks.
