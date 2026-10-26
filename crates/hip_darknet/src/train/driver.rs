@@ -160,6 +160,24 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
     let mut map_50_95 = 0.0f32;
     let mut eval_model: Option<crate::model::Model> = None;
 
+    // A header, so a run that is working is visibly working: at batch 4 the first iterations take
+    // ~20 s each, and silent gaps look like a hang.
+    eprintln!(
+        "hip_darknet train — device: CPU (reference trainer; the GPU trainer is not implemented yet)\n  \
+         {} training images, batch {batch}, {iters} iterations, {} parameters, seed {}\n  \
+         augmentation: jitter {:.2} resize {:.2} flip {} hue {:.2} sat {:.2} exp {:.2}",
+        ds.train.len(),
+        net.n_params(),
+        opts.seed,
+        aug.jitter,
+        aug.resize,
+        aug.flip,
+        aug.hue,
+        aug.saturation,
+        aug.exposure,
+        iters = opts.iters,
+    );
+
     for iteration in 1..=opts.iters {
         let t0 = Instant::now();
         let picks = next_batch(&mut rng, &mut order, &mut cursor, batch, ds.train.len());
@@ -232,8 +250,12 @@ pub fn train(cfg: &Cfg, ds: &Dataset, opts: &TrainOptions) -> Result<TrainSummar
                 res.map_50, res.map_50_95
             );
             eval_model = Some(model);
-        } else if iteration == 1 || iteration % 50 == 0 {
-            eprintln!("iter {iteration} loss {loss:.4} (avg {ema:.4}) lr {lr:.8} {:.0} ms", row.ms);
+        } else {
+            // Every iteration: at ~20 s per step a 50-iteration cadence reads as a hang.
+            eprintln!(
+                "iter {iteration}/{} loss {loss:.4} (avg {ema:.4}) lr {lr:.8} {:.0} ms  [{} images]",
+                opts.iters, row.ms, seen
+            );
         }
     }
     loss_csv.flush()?;

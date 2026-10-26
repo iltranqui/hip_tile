@@ -58,16 +58,24 @@ Three real bugs were caught by these tests, which is the argument for writing th
 
 | Kernel | Design | State |
 |---|---|---|
-| `conv_bwd_dw` | block owns one `[Cout x Cin·k²]` tile and walks the **whole batch inside its k-loop**: `A = δ[Cout x OH·OW]`, `B = im2col(x)ᵀ` gathered on the fly, `dW` accumulated in registers from the buffer's existing contents (momentum semantics) | **correct for `cin == 1`** (verified against a hand-computed 4x4/3x3 case); **wrong for `cin > 1`**, where `Cin·k²` spans more than one `BK = 16` gather block |
+| `conv_bwd_dw` | block owns one `[Cout x Cin·k²]` tile and walks the **whole batch inside its k-loop**: `A = δ[Cout x OH·OW]`, `B = im2col(x)ᵀ` gathered on the fly, `dW` seeded from the buffer's existing contents (momentum semantics) | **correct for `batch == 1`** for every shape tried (1–20 channels, k 1/3, stride 1/2, pad 0/1); **wrong when `batch > 1`** — the defect is reaching image `b > 0` |
 | `conv_bwd_dx` | transpose-convolution **gather**: `k²` GEMMs against `Co` folding into one register accumulator per `[Cin x positions]` tile, both operands gathered (weights are strided in both axes for a fixed tap), accumulated once via `store_tile_add` | written, parity blocked behind the same test |
 
-`apps/runner/tests/backward_ops.rs::conv_bwd_matches_cpu` carries the failing case and is marked
-`#[ignore]` with the reason, so the failure stays visible instead of being deleted.
+Two bugs were found and fixed while getting here, both caught by the tests rather than by reading:
 
-Next step on it: the `kidx → (ci, ky, kx)` mapping is already `ci = kidx/kk, rem = kidx − ci·kk,
-ky = rem/k, kx = rem − ky·k`, so the suspicion is the interaction between the `BM = 64` masked
-`delta` tile and the `BN = 64` gather when `k_total > BK`; a single-channel vs two-channel dump of
-`tb` is the shortest next experiment.
+1. **The early `cin > 1` diagnosis was wrong.** The kernel was right; the *comparison* was not.
+   Comparing `got` against `want + POISON` cancels to ≈ 0 for entries where the gradient happens to
+   equal `-POISON`, so the relative error was measuring f32 noise. The test now subtracts the known
+   poison first.
+2. **`store_tile_add` doubled the momentum buffer.** The kernel seeds `acc` from the buffer and then
+   stored with `store_tile_add`, so the old contents were added twice (`2·old + dW`); it must
+   overwrite (`store_tile`).
+
+What remains is only the batched case: `apps/runner/tests/backward_ops.rs::conv_bwd_matches_cpu`
+asserts the single-image shapes, and `conv_bwd_matches_cpu_batched` holds the `batch > 1` cases
+behind `#[ignore]` with the reason. Next experiment: dump the per-image base offsets
+(`b·Cout·ld` for δ, `b·Cin·ld` for x) against what the host image slice expects — the gather and
+the GEMM are already exact for image 0.
 
 ## The `[yolo]` delta, on device
 

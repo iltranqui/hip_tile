@@ -19,6 +19,24 @@ fn signed(len: usize, seed: u64) -> Vec<f32> {
     runner::random_vec(len, seed).into_iter().map(|v| v * 2.0 - 1.0).collect()
 }
 
+/// Same measure for f64 outputs (the convolution-gradient checks subtract the poison first).
+fn rel_err_64(got: &[f64], want: &[f64]) -> f64 {
+    let scale = want.iter().fold(0f64, |m, v| m.max(v.abs())).max(1e-9);
+    let mut worst = 0f64;
+    let mut worst_i = 0;
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        let rel = (g - w).abs() / w.abs().max(scale * 1e-2);
+        if rel > worst {
+            worst = rel;
+            worst_i = i;
+        }
+    }
+    if worst > 1e-6 {
+        eprintln!("  [rel_err_64] worst {worst:e} at {worst_i}: got {} want {} (scale {scale:e})", got[worst_i], want[worst_i]);
+    }
+    worst
+}
+
 fn rel_err(got: &[f32], want: &[f64]) -> f64 {
     let scale = want.iter().fold(0f64, |m, v| m.max(v.abs())).max(1e-9);
     got.iter().zip(want).map(|(g, w)| (f64::from(*g) - w).abs() / w.abs().max(scale * 1e-2)).fold(0.0, f64::max)
@@ -472,36 +490,43 @@ fn check_conv_bwd(c: ConvCase) {
     // dW into a poisoned buffer, to prove the kernel accumulates.
     let mut bdw2 = DeviceBuffer::from_slice(&vec![POISON; c.cout * kdim]).unwrap();
     launch_conv_bwd_dw(&module, None, d_view, x_view, bdw2.tensor_mut(c.cout as u32, kdim as u32), &p).unwrap();
-    let got = bdw2.copy_to_vec().unwrap();
-    let want: Vec<f64> = want_dw.iter().map(|v| v + f64::from(POISON)).collect();
-    let err = rel_err(&got, &want);
+    let got: Vec<f64> = bdw2.copy_to_vec().unwrap().iter().map(|v| f64::from(*v) - f64::from(POISON)).collect();
+    let err = rel_err_64(&got, &want_dw);
     assert!(err < 2e-4, "conv_bwd_dw {:?}: {err:e}", (c.cin, c.cout, c.h, c.w, c.k));
 
     // dX, also poisoned.
     let mut bdx = DeviceBuffer::from_slice(&vec![POISON; c.cin * hw]).unwrap();
     let w_view = Tensor::new(bw.as_ptr(), c.cout as u32, kdim as u32, kdim as u32);
     launch_conv_bwd_dx(&module, None, d_view, w_view, bdx.tensor_mut(c.cin as u32, hw as u32), &p).unwrap();
-    let got = bdx.copy_to_vec().unwrap();
-    let want: Vec<f64> = want_dx.iter().map(|v| v + f64::from(POISON)).collect();
-    let err = rel_err(&got, &want);
+    let got: Vec<f64> = bdx.copy_to_vec().unwrap().iter().map(|v| f64::from(*v) - f64::from(POISON)).collect();
+    let err = rel_err_64(&got, &want_dx);
     assert!(err < 2e-4, "conv_bwd_dx {:?}: {err:e}", (c.cin, c.cout, c.h, c.w, c.k));
 }
 
-/// KNOWN FAILURE, ignored on purpose: `conv_bwd_dw` agrees for `cin == 1` (verified with a
-/// hand-computed 4x4, 3x3-kernel case) but is wrong for `cin > 1`, i.e. when `Cin*k*k` spans more
-/// than one `BK = 16` block of the gather. Debugging the im2col index mapping is the next task;
-/// leaving the test here (ignored, not deleted) keeps the failure visible.
+/// Both convolution gradients against an f64 CPU reference, batched, with the destination poisoned
+/// to prove the kernels accumulate (the poison is subtracted before the comparison — comparing the
+/// summed values would cancel to ~0 for entries where the gradient happens to equal `-POISON`).
 #[test]
-#[ignore = "conv_bwd_dw disagrees with the CPU reference when cin > 1"]
 fn conv_bwd_matches_cpu() {
-    // batch 1, stride 1, pad 1
+    // Single-image cases, all exact.
     check_conv_bwd(ConvCase { cin: 2, cout: 3, h: 6, w: 5, k: 3, stride: 1, pad: 1, batch: 1 });
-    // batched
+    check_conv_bwd(ConvCase { cin: 1, cout: 1, h: 4, w: 4, k: 3, stride: 1, pad: 1, batch: 1 });
+    check_conv_bwd(ConvCase { cin: 3, cout: 4, h: 8, w: 8, k: 3, stride: 2, pad: 0, batch: 1 });
+    check_conv_bwd(ConvCase { cin: 5, cout: 6, h: 4, w: 4, k: 1, stride: 1, pad: 0, batch: 1 });
+    // Wider than one tile: forces the k-loop and the co-loop to iterate.
+    check_conv_bwd(ConvCase { cin: 4, cout: 20, h: 10, w: 9, k: 3, stride: 1, pad: 1, batch: 1 });
+}
+
+/// KNOWN FAILURE: with `batch > 1`, `conv_bwd_dw` disagrees with the CPU reference (the batched
+/// `dX` is fine — the first batched case fails inside the dW comparison). Single-image cases above
+/// are exact, so the defect is in reaching image `b > 0` (the per-image base offsets
+/// `b·Cout·ld` / `b·Cin·ld`), not in the gather or the GEMM. Ignored rather than deleted so the
+/// gap stays visible; this is what blocks the GPU trainer (stage 04).
+#[test]
+#[ignore = "conv_bwd_dw disagrees with the CPU reference when batch > 1"]
+fn conv_bwd_matches_cpu_batched() {
     check_conv_bwd(ConvCase { cin: 2, cout: 3, h: 6, w: 5, k: 3, stride: 1, pad: 1, batch: 2 });
-    // stride 2, no padding
     check_conv_bwd(ConvCase { cin: 3, cout: 4, h: 8, w: 8, k: 3, stride: 2, pad: 0, batch: 2 });
-    // 1x1 head conv, batched
     check_conv_bwd(ConvCase { cin: 5, cout: 6, h: 4, w: 4, k: 1, stride: 1, pad: 0, batch: 2 });
-    // wider than a tile: forces the k-loop and the co-loop to iterate
     check_conv_bwd(ConvCase { cin: 4, cout: 20, h: 10, w: 9, k: 3, stride: 1, pad: 1, batch: 2 });
 }

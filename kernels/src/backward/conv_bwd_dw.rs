@@ -62,7 +62,9 @@ fn conv_bwd_dw(delta: Tensor<f32>, x: Tensor<f32>, dw: TensorMut<f32>, p: ConvBw
             k0 += BK as u32;
         }
     }
-    dw.store_tile_add(r0, c0, &acc);
+    // `acc` already holds the buffer's previous contents (loaded above), so this **overwrites**.
+    // Using `store_tile_add` here would double the momentum buffer.
+    dw.store_tile(r0, c0, &acc);
 }
 
 /// `x: [Cin x H*W]`, `delta: [Cout x OH*OW]`, `dw: [Cout x Cin*k*k]` (accumulated into).
